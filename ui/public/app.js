@@ -1,0 +1,585 @@
+// Dashboard client for one-click trade runs, live progress, and PDF review.
+const $ = (id) => document.getElementById(id);
+
+const TICKER_RE = /^[A-Z0-9]{1,10}$/;
+
+const IDLE_PIPELINE = [
+  {
+    key: "request_ticket",
+    badge: "RQ",
+    name: "Request Ticket",
+    state: "waiting",
+    chip: "IDLE",
+    summary: "Waiting for a new run",
+    detail: "Click Request Analysis once to launch a brand new run.",
+  },
+  {
+    key: "discovery",
+    badge: "DS",
+    name: "Discovery",
+    state: "waiting",
+    chip: "IDLE",
+    summary: "Waiting for the run ticket",
+    detail: "The orchestrator will gather shared market context here.",
+  },
+  {
+    key: "trade-technical",
+    badge: "TA",
+    name: "Technical",
+    state: "waiting",
+    chip: "IDLE",
+    summary: "Waiting for discovery",
+    detail: "The chart specialist will wake up automatically.",
+  },
+  {
+    key: "trade-fundamental",
+    badge: "FA",
+    name: "Fundamental",
+    state: "waiting",
+    chip: "IDLE",
+    summary: "Waiting for discovery",
+    detail: "The financial quality specialist will wake up automatically.",
+  },
+  {
+    key: "trade-sentiment",
+    badge: "SA",
+    name: "Sentiment",
+    state: "waiting",
+    chip: "IDLE",
+    summary: "Waiting for discovery",
+    detail: "The sentiment specialist will wake up automatically.",
+  },
+  {
+    key: "trade-risk",
+    badge: "RA",
+    name: "Risk",
+    state: "waiting",
+    chip: "IDLE",
+    summary: "Waiting for discovery",
+    detail: "The risk specialist will wake up automatically.",
+  },
+  {
+    key: "trade-thesis",
+    badge: "TH",
+    name: "Thesis",
+    state: "waiting",
+    chip: "IDLE",
+    summary: "Waiting for discovery",
+    detail: "The thesis specialist will wake up automatically.",
+  },
+  {
+    key: "synthesis",
+    badge: "SX",
+    name: "Synthesis",
+    state: "waiting",
+    chip: "IDLE",
+    summary: "Waiting for agent output",
+    detail: "Fresh markdown and JSON will be assembled here.",
+  },
+  {
+    key: "pdf_forge",
+    badge: "PF",
+    name: "PDF Forge",
+    state: "waiting",
+    chip: "IDLE",
+    summary: "Waiting for fresh JSON",
+    detail: "The dashboard will render the PDF automatically when the analysis is ready.",
+  },
+];
+
+const state = {
+  ticker: (localStorage.getItem("ticker") || "SOL").toUpperCase(),
+  jobSource: null,
+  jobPollTimer: null,
+  statusPollTimer: null,
+  currentJob: null,
+  lastStatus: null,
+  previewTicker: null,
+  requestRunning: false,
+};
+
+function fmtBytes(n) {
+  if (!n && n !== 0) return "";
+  const units = ["B", "KB", "MB", "GB"];
+  let v = n;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i += 1;
+  }
+  return `${i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
+}
+
+function badgeForScore(score) {
+  if (typeof score !== "number") return { text: "--", cls: "mid" };
+  if (score >= 70) return { text: `${score}/100 BUY`, cls: "good" };
+  if (score >= 55) return { text: `${score}/100 HOLD`, cls: "mid" };
+  return { text: `${score}/100 AVOID`, cls: "bad" };
+}
+
+function normalizeTickerInput(value) {
+  const cleaned = String(value || "").trim().toUpperCase();
+  return cleaned || "";
+}
+
+function tickerLooksValid(value) {
+  return TICKER_RE.test(normalizeTickerInput(value));
+}
+
+function isActiveJob(job) {
+  return !!job && (job.status === "queued" || job.status === "running");
+}
+
+function activeJobForTicker(statusData = state.lastStatus) {
+  if (state.currentJob?.ticker === state.ticker && isActiveJob(state.currentJob)) {
+    return state.currentJob;
+  }
+  if (statusData?.activeJob?.ticker === state.ticker && isActiveJob(statusData.activeJob)) {
+    return statusData.activeJob;
+  }
+  return null;
+}
+
+function latestSavedForTicker(statusData = state.lastStatus) {
+  return statusData?.latestSaved?.ticker === state.ticker ? statusData.latestSaved : null;
+}
+
+function isLegacyStatusPayload(statusData = state.lastStatus) {
+  return !!statusData && Array.isArray(statusData.steps) && !("savedPipeline" in statusData);
+}
+
+function savedFileUrl(file) {
+  if (!file?.path) return null;
+  return file.previewPath || `${file.path}?v=${Math.floor(file.mtimeMs || Date.now())}`;
+}
+
+function pipelineForDisplay(statusData = state.lastStatus) {
+  const activeJob = activeJobForTicker(statusData);
+  if (activeJob?.pipeline?.length) return activeJob.pipeline;
+  if (statusData?.savedPipeline?.length) return statusData.savedPipeline;
+  return IDLE_PIPELINE;
+}
+
+function renderMission(statusData = state.lastStatus) {
+  const mission = $("mission");
+  if (!mission) return;
+
+  const pipeline = pipelineForDisplay(statusData);
+  const liveJob = activeJobForTicker(statusData);
+  const latestSaved = latestSavedForTicker(statusData);
+
+  const doneCount = pipeline.filter((card) => card.state === "done").length;
+  const pct = Math.round((doneCount / Math.max(pipeline.length, 1)) * 100);
+
+  let title = `One-click analysis machine for ${state.ticker}`;
+  let subtitle = "A fresh run will launch all analysis steps automatically and reveal the new PDF when it finishes.";
+  let pill = "Idle";
+
+  if (isLegacyStatusPayload(statusData)) {
+    title = `Backend restart required for ${state.ticker}`;
+    subtitle = "This page is talking to an older dashboard server process. Restart start-dashboard.bat so live pipeline stages can stream correctly.";
+    pill = "Restart";
+  } else if (liveJob) {
+    const runLabel = liveJob.runId ? `Run ${String(liveJob.runId).slice(0, 8)}` : "Live run";
+    title = `Fresh analysis running for ${state.ticker}`;
+    subtitle = "Every stage after the initial request is automatic. The dashboard is hiding older saved files while the fresh run is in flight.";
+    pill = runLabel;
+  } else if (latestSaved?.files?.pdf) {
+    title = `Latest saved report ready for ${state.ticker}`;
+    subtitle = "Review Last Analysis opens the latest completed saved run. Request Analysis starts a brand new one.";
+    pill = "Ready";
+  }
+
+  mission.innerHTML = `
+    <div class="mission-head">
+      <div>
+        <div class="mission-title">${title}</div>
+        <div class="mission-sub">${subtitle}</div>
+      </div>
+      <div class="mission-pill">${pill}</div>
+    </div>
+    <div class="mission-rail">
+      <div class="mission-rail-fill" style="width:${pct}%"></div>
+    </div>
+    <div class="mission-workers">
+      ${pipeline.map((card) => `
+        <div class="mission-card is-${card.state}">
+          <div class="mission-card-top">
+            <div class="mission-agent">
+              <div class="mission-badge">${card.badge}</div>
+              <div class="mission-copy">
+                <div class="mission-name">${card.name}</div>
+                <div class="mission-state">${card.summary}</div>
+              </div>
+            </div>
+            <div class="mission-signal">
+              <div class="mission-chip">${card.chip}</div>
+              <div class="mission-dot"></div>
+            </div>
+          </div>
+          <div class="mission-detail">${card.detail}</div>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+async function apiGet(pathname) {
+  const response = await fetch(pathname, { cache: "no-store" });
+  if (!response.ok) throw new Error(await response.text());
+  return response.json();
+}
+
+async function apiPost(pathname, body) {
+  const response = await fetch(pathname, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+  if (!response.ok) throw new Error(await response.text());
+  return response.json();
+}
+
+function clearJobStream() {
+  if (!state.jobSource) return;
+  try {
+    state.jobSource.close();
+  } catch {}
+  state.jobSource = null;
+}
+
+function clearJobPolling() {
+  if (!state.jobPollTimer) return;
+  clearInterval(state.jobPollTimer);
+  state.jobPollTimer = null;
+}
+
+function syncStatusPolling() {
+  const shouldPoll = state.requestRunning;
+  if (shouldPoll && !state.statusPollTimer) {
+    state.statusPollTimer = setInterval(() => {
+      refreshStatus({ loadPreview: false }).catch(() => {});
+    }, 2000);
+  }
+  if (!shouldPoll && state.statusPollTimer) {
+    clearInterval(state.statusPollTimer);
+    state.statusPollTimer = null;
+  }
+}
+
+function setBusyState() {
+  $("btn-request").disabled = state.requestRunning;
+  $("btn-review").disabled = state.requestRunning;
+  syncStatusPolling();
+}
+
+function setEmptyPreview(title, subtitle) {
+  state.previewTicker = null;
+  $("pdf").src = "about:blank";
+  $("empty-title").textContent = title;
+  $("empty-sub").textContent = subtitle;
+  $("empty").style.display = "grid";
+}
+
+function withPdfViewerParams(pdfUrl) {
+  if (!pdfUrl) return pdfUrl;
+  return `${pdfUrl}#zoom=page-fit&pagemode=none`;
+}
+
+function showPdfPreview(pdfUrl, ticker) {
+  if (!pdfUrl) return;
+  state.previewTicker = ticker;
+  $("pdf").src = withPdfViewerParams(pdfUrl);
+  $("empty").style.display = "none";
+}
+
+function setJobLog(text) {
+  const el = $("joblog");
+  el.textContent = text || "";
+  el.scrollTop = el.scrollHeight;
+}
+
+function appendJobLog(line) {
+  const el = $("joblog");
+  el.textContent = (el.textContent ? `${el.textContent}\n` : "") + line;
+  el.scrollTop = el.scrollHeight;
+}
+
+function updateArtifactLinks(statusData = state.lastStatus) {
+  const latestSaved = latestSavedForTicker(statusData);
+  const links = latestSaved?.files || {};
+  $("link-md").href = savedFileUrl(links.md) || `/trade/TRADE-ANALYSIS-${state.ticker}.md`;
+  $("link-json").href = savedFileUrl(links.json) || `/trade/TRADE-ANALYSIS-${state.ticker}.json`;
+  $("link-pdf").href = savedFileUrl(links.pdf) || `/trade/TRADE-ANALYSIS-${state.ticker}.pdf`;
+}
+
+async function refreshReports() {
+  const data = await apiGet("/api/reports");
+  const host = $("reports");
+  host.innerHTML = "";
+
+  for (const report of data.reports || []) {
+    const score = report?.meta?.overall_score;
+    const badge = badgeForScore(score);
+    const note = report?.meta?.date || (report.source === "run" ? "Saved run snapshot" : "Legacy saved files");
+    const div = document.createElement("div");
+    div.className = "report";
+    div.onclick = async () => {
+      setTicker(report.ticker, { loadPreview: false });
+      await reviewLastAnalysis();
+    };
+    div.innerHTML = `
+      <div>
+        <div class="t">${report.ticker}</div>
+        <div class="hint">${note}</div>
+      </div>
+      <div class="badge ${badge.cls}">${badge.text}</div>
+    `;
+    host.appendChild(div);
+  }
+}
+
+function renderStatusRows(statusData) {
+  const host = $("status");
+  host.innerHTML = "";
+
+  for (const step of statusData.steps || []) {
+    const hasFile = !!step.exists;
+    const dotCls = hasFile ? (step.fresh ? "dot ok" : "dot warn") : "dot";
+    const freshness = !hasFile ? "missing" : step.fresh ? "fresh for current request" : "older saved file";
+    const meta = hasFile
+      ? `${fmtBytes(step.bytes)} | ${new Date(step.mtimeMs).toLocaleString()} | ${freshness}`
+      : freshness;
+    const row = document.createElement("div");
+    row.className = "step";
+    row.innerHTML = `
+      <div class="left">
+        <div class="${dotCls}"></div>
+        <div class="label">${step.label}</div>
+      </div>
+      <div class="meta">${meta}</div>
+    `;
+    host.appendChild(row);
+  }
+
+  const latestSaved = latestSavedForTicker(statusData);
+  if (latestSaved) {
+    const row = document.createElement("div");
+    row.className = "step";
+    row.innerHTML = `
+      <div class="left">
+        <div class="dot ok"></div>
+        <div class="label">Latest Saved Run</div>
+      </div>
+      <div class="meta">${latestSaved.runId ? `snapshot ${String(latestSaved.runId).slice(0, 8)}` : "legacy saved files"}</div>
+    `;
+    host.appendChild(row);
+  }
+}
+
+async function refreshStatus(options = {}) {
+  const { loadPreview = false } = options;
+  if (!tickerLooksValid(state.ticker)) return null;
+  const data = await apiGet(`/api/status?ticker=${encodeURIComponent(state.ticker)}`);
+  state.lastStatus = data;
+
+  if (!state.currentJob && data.activeJob?.ticker === state.ticker && isActiveJob(data.activeJob)) {
+    state.currentJob = data.activeJob;
+    state.requestRunning = true;
+  }
+
+  renderStatusRows(data);
+  updateArtifactLinks(data);
+  renderMission(data);
+
+  if (loadPreview) {
+    const latestSaved = latestSavedForTicker(data);
+    if (latestSaved?.files?.pdf) {
+      showPdfPreview(savedFileUrl(latestSaved.files.pdf), state.ticker);
+    } else {
+      setEmptyPreview(
+        `No saved PDF for ${state.ticker}`,
+        "Request a fresh analysis to generate and reveal the next report automatically."
+      );
+    }
+  }
+
+  setBusyState();
+  return data;
+}
+
+function setTicker(value, options = {}) {
+  const cleaned = normalizeTickerInput(value);
+  state.ticker = cleaned || "SOL";
+  localStorage.setItem("ticker", state.ticker);
+  $("ticker").value = state.ticker;
+
+  if (!tickerLooksValid(state.ticker)) {
+    renderMission({ savedPipeline: IDLE_PIPELINE });
+    return;
+  }
+
+  refreshStatus({ loadPreview: options.loadPreview === true }).catch(() => {});
+  if (!options.loadPreview) {
+    setEmptyPreview(
+      `Ready to analyze ${state.ticker}`,
+      "Request Analysis starts a fresh run. Review Last Analysis opens the latest saved report snapshot."
+    );
+  }
+}
+
+function finishActiveRun({ loadPreview }) {
+  state.requestRunning = false;
+  clearJobStream();
+  clearJobPolling();
+  setBusyState();
+  refreshReports().catch(() => {});
+  refreshStatus({ loadPreview }).catch(() => {});
+}
+
+function handleJobUpdate(job, options = {}) {
+  if (!job) return;
+  state.currentJob = job;
+  state.requestRunning = isActiveJob(job);
+  renderMission();
+  setBusyState();
+
+  if (job.status === "done") {
+    appendJobLog("DONE: one-click analysis pipeline complete");
+    finishActiveRun({ loadPreview: true });
+    return;
+  }
+
+  if (job.status === "error") {
+    appendJobLog(`ERROR: ${job.error || "unknown"}`);
+    finishActiveRun({ loadPreview: false });
+    return;
+  }
+
+  if (options.fromPoll) {
+    renderMission();
+  }
+}
+
+function startJobPolling(jobId) {
+  clearJobPolling();
+  state.jobPollTimer = setInterval(async () => {
+    try {
+      const data = await apiGet(`/api/jobs/${encodeURIComponent(jobId)}`);
+      handleJobUpdate(data.job, { fromPoll: true });
+      if (data.job?.status === "done" || data.job?.status === "error") {
+        clearJobPolling();
+      }
+    } catch {}
+  }, 2000);
+}
+
+function trackJob(jobId) {
+  clearJobStream();
+  clearJobPolling();
+
+  const source = new EventSource(`/api/jobs/${encodeURIComponent(jobId)}/events`);
+  state.jobSource = source;
+
+  source.onmessage = (event) => {
+    try {
+      const message = JSON.parse(event.data);
+      if (message.type === "log" && message.line) appendJobLog(message.line);
+      if (message.type === "job" && message.job) handleJobUpdate(message.job);
+    } catch {}
+  };
+
+  source.onerror = () => {
+    clearJobStream();
+    appendJobLog("Live stream interrupted. Switching to polling until the run finishes.");
+    startJobPolling(jobId);
+  };
+}
+
+async function requestAnalysis() {
+  if (state.requestRunning) return;
+  if (!tickerLooksValid(state.ticker)) {
+    appendJobLog("Enter a valid ticker first.");
+    return;
+  }
+
+  const ticker = state.ticker;
+  state.requestRunning = true;
+  state.currentJob = null;
+  setBusyState();
+  setJobLog("");
+  clearJobStream();
+  clearJobPolling();
+  setEmptyPreview(
+    `Running fresh analysis for ${ticker}`,
+    "Older saved reports are hidden while the new end-to-end run is working."
+  );
+
+  try {
+    const response = await apiPost("/api/run-analysis", { ticker });
+    appendJobLog(`Started /trade analyze ${ticker}...`);
+    if (response.job) handleJobUpdate(response.job);
+    if (response.status) {
+      state.lastStatus = response.status;
+      updateArtifactLinks(response.status);
+      renderStatusRows(response.status);
+      renderMission(response.status);
+    }
+    trackJob(response.jobId);
+  } catch (error) {
+    state.requestRunning = false;
+    setBusyState();
+    throw error;
+  }
+}
+
+async function reviewLastAnalysis() {
+  if (!tickerLooksValid(state.ticker)) {
+    appendJobLog("Enter a valid ticker first.");
+    return;
+  }
+  appendJobLog(`Reviewing the latest saved analysis for ${state.ticker}...`);
+  const statusData = await refreshStatus({ loadPreview: true });
+  if (!latestSavedForTicker(statusData)?.files?.pdf) {
+    appendJobLog(`No saved PDF snapshot exists yet for ${state.ticker}.`);
+  }
+}
+
+function wire() {
+  $("ticker").value = state.ticker;
+  $("ticker").addEventListener("input", (event) => {
+    state.ticker = normalizeTickerInput(event.target.value);
+    localStorage.setItem("ticker", state.ticker);
+  });
+  $("ticker").addEventListener("change", (event) => setTicker(event.target.value));
+  $("ticker").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      setTicker(event.target.value);
+      requestAnalysis().catch((error) => appendJobLog(String(error)));
+    }
+  });
+
+  $("btn-refresh").onclick = async () => {
+    await refreshReports();
+    await refreshStatus({ loadPreview: false });
+  };
+  $("btn-request").onclick = () => requestAnalysis().catch((error) => appendJobLog(String(error)));
+  $("btn-review").onclick = () => reviewLastAnalysis().catch((error) => appendJobLog(String(error)));
+
+  setBusyState();
+  renderMission({ savedPipeline: IDLE_PIPELINE });
+}
+
+async function boot() {
+  wire();
+  setEmptyPreview(
+    `Ready to analyze ${state.ticker}`,
+    "Request Analysis launches a fresh end-to-end run. Review Last Analysis opens the latest saved snapshot."
+  );
+  await refreshReports();
+  await refreshStatus({ loadPreview: false });
+}
+
+boot().catch((error) => {
+  setJobLog(String(error));
+});

@@ -1,0 +1,33 @@
+# Purpose: Keep secrets, caches, and generated outputs out of Git.
+
+# Secrets
+.env
+.env.*
+!.env_example
+
+# Local AI tool metadata
+.agent/
+.claude/
+
+# Python cache / temp
+__pycache__/
+*.pyc
+scripts/__pycache__/
+scripts/.tmp-tests/
+
+# Node / logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.log
+!*.md
+
+# Generated trade outputs
+trade/.runs/
+trade/TRADE-ANALYSIS-*.json
+trade/TRADE-ANALYSIS-*.md
+trade/TRADE-ANALYSIS-*.pdf
+
+# Local request/output scratch files
+BTC + XRP Market Analysis.md
+requests/*.txt

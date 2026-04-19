@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <!-- Dashboard shell for the one-click local trade analysis workflow. -->
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Trade Dashboard</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="top">
+        <div class="brand">
+          <div class="logo">TA</div>
+          <div class="title">
+            <div class="name">Trade Dashboard</div>
+            <div class="sub">One click in, live pipeline up, fresh PDF out</div>
+          </div>
+        </div>
+
+        <div class="controls">
+          <label class="field">
+            <span>Ticker</span>
+            <input id="ticker" inputmode="latin" autocomplete="off" spellcheck="false" placeholder="SOL" />
+          </label>
+
+          <button id="btn-request" class="btn btn-primary">Request Analysis</button>
+          <button id="btn-review" class="btn">Review Last Analysis</button>
+          <button id="btn-refresh" class="btn btn-ghost">Refresh</button>
+        </div>
+      </header>
+
+      <main class="grid">
+        <section class="panel left">
+          <div class="panel-head">
+            <div class="h">Status</div>
+            <div class="hint">Fresh run files versus older saved output</div>
+          </div>
+          <div id="status" class="status"></div>
+
+          <div class="panel-head">
+            <div class="h">Reports</div>
+            <div class="hint">Latest saved snapshot per ticker</div>
+          </div>
+          <div id="reports" class="reports"></div>
+
+          <div class="panel-head">
+            <div class="h">Job Log</div>
+            <div class="hint">Live analysis and PDF output</div>
+          </div>
+          <pre id="joblog" class="joblog"></pre>
+        </section>
+
+        <section class="panel right">
+          <div class="panel-head row">
+            <div>
+              <div class="h">PDF Preview</div>
+              <div class="hint">Automatically opens the newest finished report snapshot</div>
+            </div>
+            <div class="row-actions">
+              <a id="link-md" class="link" href="#" target="_blank" rel="noreferrer">MD</a>
+              <a id="link-json" class="link" href="#" target="_blank" rel="noreferrer">JSON</a>
+              <a id="link-pdf" class="link" href="#" target="_blank" rel="noreferrer">PDF</a>
+            </div>
+          </div>
+
+          <div id="mission" class="mission"></div>
+
+          <div class="preview">
+            <iframe id="pdf" title="PDF preview"></iframe>
+            <div id="empty" class="empty">
+              <div class="empty-card">
+                <div id="empty-title" class="empty-title">No PDF loaded</div>
+                <div id="empty-sub" class="empty-sub">Request a fresh analysis or review the last saved report.</div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
