@@ -7,13 +7,21 @@ const {
   buildAnalysisPipeline,
   buildFundamentalRead,
   buildTechnicalRead,
+  buildXaiDebateRequest,
+  buildXaiAnalysisRequest,
   hasSourcedFundamentals,
   hasSourcedTechnical,
   mergeSourcedAnalysis,
   normalizeTicker,
+  parseXaiStructuredResponse,
   pickLatestReport,
+  applyResearchDebate,
   removeStaleLegacyFiles,
+  renderMarkdownFromAnalysis,
   safeJoin,
+  summarizeReportInsight,
+  validateResearchDebate,
+  validateStructuredAnalysis,
 } = require("./server");
 
 test("normalizeTicker accepts uppercase alphanumeric tickers", () => {
@@ -46,7 +54,15 @@ test("buildAnalysisPipeline marks all specialist agents live during the swarm", 
   const activeAgents = pipeline.filter((card) => card.key.startsWith("trade-") && card.state === "active");
   assert.equal(activeAgents.length, 5);
   assert.equal(pipeline.find((card) => card.key === "request_ticket")?.state, "done");
+  assert.equal(pipeline.find((card) => card.key === "research_debate")?.state, "queued");
   assert.equal(pipeline.find((card) => card.key === "pdf_forge")?.state, "waiting");
+});
+
+test("buildAnalysisPipeline shows research debate as its own active stage", () => {
+  const pipeline = buildAnalysisPipeline({ status: "running", stage: "research_debate" });
+  assert.equal(pipeline.find((card) => card.key === "trade-thesis")?.state, "done");
+  assert.equal(pipeline.find((card) => card.key === "research_debate")?.state, "active");
+  assert.equal(pipeline.find((card) => card.key === "synthesis")?.state, "queued");
 });
 
 test("pickLatestReport prefers the newest saved report", () => {
@@ -88,6 +104,161 @@ test("removeStaleLegacyFiles keeps a PDF generated with the newest analysis file
   const pruned = removeStaleLegacyFiles(files);
 
   assert.equal(pruned.pdf, files.pdf);
+});
+
+test("buildXaiAnalysisRequest uses Responses API with strict JSON schema", () => {
+  const request = buildXaiAnalysisRequest({
+    cfg: { baseUrl: "https://api.x.ai/v1", model: "grok-4.3" },
+    systemPrompt: "system prompt",
+    userPrompt: "user prompt",
+  });
+
+  assert.equal(request.endpoint, "https://api.x.ai/v1/responses");
+  assert.equal(request.body.model, "grok-4.3");
+  assert.equal(request.body.store, false);
+  assert.equal(request.body.text.format.type, "json_schema");
+  assert.equal(request.body.text.format.name, "trade_analysis");
+  assert.equal(request.body.text.format.strict, true);
+  assert.equal(request.body.text.format.schema.required.includes("risk"), true);
+  assert.deepEqual(request.body.input.map((msg) => msg.role), ["system", "user"]);
+});
+
+test("parseXaiStructuredResponse reads Responses API output text", () => {
+  const payload = JSON.stringify({
+    output: [
+      {
+        type: "message",
+        role: "assistant",
+        content: [
+          {
+            type: "output_text",
+            text: JSON.stringify({
+              ticker: "BTC",
+              company_name: "Bitcoin",
+              date: "May 09, 2026",
+              overall_score: 67,
+              categories: {},
+              technical: {},
+              fundamental: {},
+              thesis: {},
+              risk: {},
+            }),
+          },
+        ],
+      },
+    ],
+  });
+
+  const parsed = parseXaiStructuredResponse(payload);
+
+  assert.equal(parsed.ticker, "BTC");
+  assert.equal(parsed.company_name, "Bitcoin");
+});
+
+test("validateStructuredAnalysis rejects incomplete model output", () => {
+  assert.throws(
+    () => validateStructuredAnalysis({ ticker: "BTC", company_name: "Bitcoin" }),
+    /missing required field: date/
+  );
+});
+
+test("buildXaiDebateRequest uses a strict research debate schema", () => {
+  const request = buildXaiDebateRequest({
+    cfg: { baseUrl: "https://api.x.ai/v1", model: "grok-4.3" },
+    ticker: "BTC",
+    analysis: { ticker: "BTC", overall_score: 67 },
+    promptSnapshot: { asset: { ticker: "BTC" } },
+  });
+
+  assert.equal(request.endpoint, "https://api.x.ai/v1/responses");
+  assert.equal(request.body.text.format.name, "research_debate");
+  assert.equal(request.body.text.format.strict, true);
+  assert.equal(request.body.text.format.schema.required.includes("research_manager"), true);
+  assert.match(request.body.input[1].content, /Bull Analyst/i);
+  assert.match(request.body.input[1].content, /Bear Analyst/i);
+});
+
+test("applyResearchDebate attaches verdict and can adjust the final score", () => {
+  const analysis = {
+    ticker: "BTC",
+    overall_score: 67,
+    categories: {
+      "Thesis Conviction": { score: 60, weight: "10%" },
+    },
+  };
+  const debate = validateResearchDebate({
+    bull_argument: "Flows and technical structure support continuation.",
+    bear_argument: "Macro liquidity and volatility can invalidate the setup.",
+    research_manager: {
+      verdict: "Bull case is stronger, but only modestly.",
+      final_score: 72,
+      final_signal: "BUY",
+      confidence: "Medium",
+      score_adjustments: [{ dimension: "Thesis Conviction", from: 60, to: 68, reason: "Debate improved conviction." }],
+      key_watch_items: ["Confirm breakout volume"],
+    },
+  });
+
+  const next = applyResearchDebate(analysis, debate);
+
+  assert.equal(next.overall_score, 72);
+  assert.equal(next.categories["Thesis Conviction"].score, 68);
+  assert.equal(next.research_debate.research_manager.final_signal, "BUY");
+});
+
+test("renderMarkdownFromAnalysis includes the research debate section", () => {
+  const markdown = renderMarkdownFromAnalysis({
+    ticker: "BTC",
+    company_name: "Bitcoin",
+    date: "May 09, 2026",
+    overall_score: 72,
+    categories: {},
+    technical: {},
+    fundamental: {},
+    thesis: {},
+    risk: {},
+    research_debate: {
+      bull_argument: "Bull evidence.",
+      bear_argument: "Bear evidence.",
+      research_manager: {
+        verdict: "Bull case wins narrowly.",
+        final_signal: "BUY",
+        confidence: "Medium",
+        key_watch_items: ["Volume confirmation"],
+      },
+    },
+  });
+
+  assert.match(markdown, /## Research Debate/);
+  assert.match(markdown, /Bull evidence/);
+  assert.match(markdown, /Bull case wins narrowly/);
+});
+
+test("summarizeReportInsight exposes compact debate metadata", () => {
+  const insight = summarizeReportInsight({
+    overall_score: 72,
+    research_debate: {
+      bull_argument: "ETF flows and trend strength support continuation.",
+      bear_argument: "Liquidity shocks could invalidate the setup.",
+      research_manager: {
+        verdict: "Bull case wins narrowly while risk remains elevated.",
+        initial_score: 67,
+        final_score: 72,
+        final_signal: "BUY",
+        confidence: "Medium",
+        score_adjustments: [{ dimension: "Risk", from: 60, to: 64, reason: "Risk improved." }],
+        key_watch_items: ["Confirm volume expansion", "Watch macro liquidity"],
+      },
+    },
+  });
+
+  assert.equal(insight.hasResearchDebate, true);
+  assert.equal(insight.initialScore, 67);
+  assert.equal(insight.finalScore, 72);
+  assert.equal(insight.scoreDelta, 5);
+  assert.equal(insight.finalSignal, "BUY");
+  assert.equal(insight.confidence, "Medium");
+  assert.equal(insight.watchItems.length, 2);
 });
 
 test("buildTechnicalRead derives real levels and indicators from candles", () => {

@@ -49,6 +49,16 @@ class GenerateTradePdfTests(unittest.TestCase):
                     }
                 ]
             },
+            "research_debate": {
+                "bull_argument": "Momentum supports continuation.",
+                "bear_argument": "Volatility can invalidate the setup.",
+                "research_manager": {
+                    "verdict": "Bull case is stronger, but watch volume.",
+                    "final_signal": "BUY",
+                    "confidence": "Medium",
+                    "key_watch_items": ["Volume confirmation"],
+                },
+            },
         }
 
         temp_root = Path(__file__).resolve().parent / ".tmp-tests"

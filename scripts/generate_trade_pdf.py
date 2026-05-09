@@ -669,6 +669,33 @@ def generate_report(data, output_path):
         elements.append(Paragraph(f"{i}. {escape_paragraph_text(pt)}", S["body"]))
     elements.append(Spacer(1, 10))
 
+    research_debate = data.get("research_debate") or {}
+    research_manager = research_debate.get("research_manager") or {}
+    if research_debate and research_manager:
+        elements.append(Paragraph("Research Debate", S["subheading"]))
+        elements.append(Paragraph(
+            f"<b>Bull Analyst:</b> {escape_paragraph_text(research_debate.get('bull_argument', ''))}",
+            S["body_small"],
+        ))
+        elements.append(Spacer(1, 4))
+        elements.append(Paragraph(
+            f"<b>Bear Analyst:</b> {escape_paragraph_text(research_debate.get('bear_argument', ''))}",
+            S["body_small"],
+        ))
+        elements.append(Spacer(1, 4))
+        verdict = research_manager.get("verdict", "")
+        signal = research_manager.get("final_signal", "")
+        confidence = research_manager.get("confidence", "")
+        elements.append(Paragraph(
+            f"<b>Research Manager:</b> {escape_paragraph_text(verdict)} "
+            f"(Signal: {escape_paragraph_text(signal or '--')}, Confidence: {escape_paragraph_text(confidence or '--')})",
+            S["body_small"],
+        ))
+        watch_items = research_manager.get("key_watch_items", [])[:3]
+        for item in watch_items:
+            elements.append(Paragraph(f"&bull; Watch: {escape_paragraph_text(item)}", S["bullet"]))
+        elements.append(Spacer(1, 10))
+
     if fear_greed or social_x or crypto_global:
         elements.append(Paragraph("Crypto Social Intelligence", S["subheading"]))
 

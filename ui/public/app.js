@@ -68,6 +68,15 @@ const IDLE_PIPELINE = [
     detail: "The thesis specialist will wake up automatically.",
   },
   {
+    key: "research_debate",
+    badge: "BD",
+    name: "Bull/Bear Debate",
+    state: "waiting",
+    chip: "IDLE",
+    summary: "Waiting for agent output",
+    detail: "Bull, bear, and research manager will challenge the initial thesis.",
+  },
+  {
     key: "synthesis",
     badge: "SX",
     name: "Synthesis",
@@ -110,11 +119,30 @@ function fmtBytes(n) {
   return `${i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
 }
 
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
 function badgeForScore(score) {
   if (typeof score !== "number") return { text: "--", cls: "mid" };
   if (score >= 70) return { text: `${score}/100 BUY`, cls: "good" };
   if (score >= 55) return { text: `${score}/100 HOLD`, cls: "mid" };
   return { text: `${score}/100 AVOID`, cls: "bad" };
+}
+
+function fmtScore(score) {
+  return typeof score === "number" ? `${Math.round(score)}` : "--";
+}
+
+function fmtScoreDelta(delta) {
+  if (typeof delta !== "number") return "--";
+  if (delta > 0) return `+${Math.round(delta)}`;
+  return `${Math.round(delta)}`;
 }
 
 function normalizeTickerInput(value) {
@@ -148,6 +176,12 @@ function isLegacyStatusPayload(statusData = state.lastStatus) {
   return !!statusData && Array.isArray(statusData.steps) && !("savedPipeline" in statusData);
 }
 
+function isStaleBackendPayload(statusData = state.lastStatus) {
+  if (!statusData || isLegacyStatusPayload(statusData)) return false;
+  const pipelines = [statusData.savedPipeline, statusData.activeJob?.pipeline].filter(Array.isArray);
+  return pipelines.some((pipeline) => pipeline.length > 0 && !pipeline.some((card) => card.key === "research_debate"));
+}
+
 function savedFileUrl(file) {
   if (!file?.path) return null;
   return file.previewPath || `${file.path}?v=${Math.floor(file.mtimeMs || Date.now())}`;
@@ -179,6 +213,10 @@ function renderMission(statusData = state.lastStatus) {
     title = `Backend restart required for ${state.ticker}`;
     subtitle = "This page is talking to an older dashboard server process. Restart start-dashboard.bat so live pipeline stages can stream correctly.";
     pill = "Restart";
+  } else if (isStaleBackendPayload(statusData)) {
+    title = `Backend restart required for ${state.ticker}`;
+    subtitle = "The frontend is current, but the running server is older and cannot start the Bull/Bear Debate stage. Close and rerun start-dashboard.bat.";
+    pill = "Stale";
   } else if (liveJob) {
     const runLabel = liveJob.runId ? `Run ${String(liveJob.runId).slice(0, 8)}` : "Live run";
     title = `Fresh analysis running for ${state.ticker}`;
@@ -221,6 +259,105 @@ function renderMission(statusData = state.lastStatus) {
         </div>
       `).join("")}
     </div>
+  `;
+}
+
+function renderDebateSummary(statusData = state.lastStatus) {
+  const host = $("debate-summary");
+  if (!host) return;
+
+  const liveJob = activeJobForTicker(statusData);
+  const latestSaved = latestSavedForTicker(statusData);
+  const insight = latestSaved?.insight || null;
+
+  if (liveJob) {
+    host.hidden = false;
+    host.className = "debate-summary is-pending";
+    host.innerHTML = `
+      <div class="debate-title-row">
+        <div>
+          <div class="debate-title">Research Debate</div>
+          <div class="debate-sub">Bull, bear, and manager verdict will appear after the fresh run completes.</div>
+        </div>
+        <div class="debate-status">Pending</div>
+      </div>
+    `;
+    return;
+  }
+
+  if (!latestSaved) {
+    host.hidden = true;
+    host.innerHTML = "";
+    return;
+  }
+
+  if (!insight?.hasResearchDebate) {
+    host.hidden = false;
+    host.className = "debate-summary is-empty";
+    host.innerHTML = `
+      <div class="debate-title-row">
+        <div>
+          <div class="debate-title">Research Debate</div>
+          <div class="debate-sub">This saved report was generated before the Phase 2 debate pass.</div>
+        </div>
+        <div class="debate-status is-muted">No Debate</div>
+      </div>
+    `;
+    return;
+  }
+
+  const delta = insight.scoreDelta;
+  const deltaClass = typeof delta === "number" && delta > 0 ? "is-up" : typeof delta === "number" && delta < 0 ? "is-down" : "";
+  const watchItems = (insight.watchItems || []).slice(0, 3);
+  host.hidden = false;
+  host.className = "debate-summary";
+  host.innerHTML = `
+    <div class="debate-title-row">
+      <div>
+        <div class="debate-title">Research Debate</div>
+        <div class="debate-sub">${escapeHtml(latestSaved.ticker)} debated by bull, bear, and research manager</div>
+      </div>
+      <div class="debate-status">Debated</div>
+    </div>
+
+    <div class="debate-score-row">
+      <div class="debate-score">
+        <span>Initial</span>
+        <strong>${fmtScore(insight.initialScore)}</strong>
+      </div>
+      <div class="debate-arrow">&rarr;</div>
+      <div class="debate-score">
+        <span>Manager</span>
+        <strong>${fmtScore(insight.finalScore)}</strong>
+      </div>
+      <div class="debate-delta ${deltaClass}">${fmtScoreDelta(delta)}</div>
+      <div class="debate-signal">${escapeHtml(insight.finalSignal || "--")}</div>
+      <div class="debate-confidence">${escapeHtml(insight.confidence || "--")} confidence</div>
+    </div>
+
+    <div class="debate-grid">
+      <div class="debate-column is-bull">
+        <div class="debate-label">Bull Analyst</div>
+        <div class="debate-copy">${escapeHtml(insight.bullArgument || "--")}</div>
+      </div>
+      <div class="debate-column is-bear">
+        <div class="debate-label">Bear Analyst</div>
+        <div class="debate-copy">${escapeHtml(insight.bearArgument || "--")}</div>
+      </div>
+      <div class="debate-column is-manager">
+        <div class="debate-label">Research Manager</div>
+        <div class="debate-copy">${escapeHtml(insight.verdict || "--")}</div>
+      </div>
+    </div>
+
+    ${watchItems.length ? `
+      <div class="debate-watch">
+        <div class="debate-label">Watch Items</div>
+        <div class="debate-watch-list">
+          ${watchItems.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}
+        </div>
+      </div>
+    ` : ""}
   `;
 }
 
@@ -321,6 +458,7 @@ async function refreshReports() {
   for (const report of data.reports || []) {
     const score = report?.meta?.overall_score;
     const badge = badgeForScore(score);
+    const hasDebate = !!(report?.insight?.hasResearchDebate || report?.meta?.research_debate);
     const note = report?.meta?.date || (report.source === "run" ? "Saved run snapshot" : "Legacy saved files");
     const div = document.createElement("div");
     div.className = "report";
@@ -330,10 +468,13 @@ async function refreshReports() {
     };
     div.innerHTML = `
       <div>
-        <div class="t">${report.ticker}</div>
-        <div class="hint">${note}</div>
+        <div class="t">${escapeHtml(report.ticker)}</div>
+        <div class="hint">${escapeHtml(note)}</div>
       </div>
-      <div class="badge ${badge.cls}">${badge.text}</div>
+      <div class="report-markers">
+        <div class="debate-mini ${hasDebate ? "is-on" : "is-off"}">${hasDebate ? "Debated" : "No Debate"}</div>
+        <div class="badge ${badge.cls}">${escapeHtml(badge.text)}</div>
+      </div>
     `;
     host.appendChild(div);
   }
@@ -391,6 +532,7 @@ async function refreshStatus(options = {}) {
   renderStatusRows(data);
   updateArtifactLinks(data);
   renderMission(data);
+  renderDebateSummary(data);
 
   if (loadPreview) {
     const latestSaved = latestSavedForTicker(data);
@@ -416,6 +558,7 @@ function setTicker(value, options = {}) {
 
   if (!tickerLooksValid(state.ticker)) {
     renderMission({ savedPipeline: IDLE_PIPELINE });
+    renderDebateSummary(null);
     return;
   }
 
@@ -568,6 +711,7 @@ function wire() {
 
   setBusyState();
   renderMission({ savedPipeline: IDLE_PIPELINE });
+  renderDebateSummary(null);
 }
 
 async function boot() {

@@ -72,7 +72,7 @@ const DEFAULT_PYTHON =
 
 const DEFAULT_ANALYSIS_ENGINE = (process.env.ANALYSIS_ENGINE || "auto").trim().toLowerCase();
 const DEFAULT_XAI_BASE_URL = (process.env.XAI_BASE_URL || process.env.XAI_API_BASE || "https://api.x.ai/v1").trim().replace(/\/+$/, "");
-const DEFAULT_XAI_MODEL = (process.env.XAI_MODEL || "grok-3-mini").trim();
+const DEFAULT_XAI_MODEL = (process.env.XAI_MODEL || "grok-4.3").trim();
 const DEFAULT_BINANCE_BASE_URL = (process.env.BINANCE_API_BASE || "https://api.binance.com").trim().replace(/\/+$/, "");
 const DEFAULT_COINGECKO_BASE_URL = (process.env.COINGECKO_API_BASE || "https://api.coingecko.com/api/v3").trim().replace(/\/+$/, "");
 const DEFAULT_COINGECKO_API_KEY = (
@@ -108,6 +108,231 @@ const DATA_CACHE = new Map();
 const FEAR_GREED_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const CMC_CACHE_TTL_MS = 5 * 60 * 1000;
 const X_CACHE_TTL_MS = 15 * 60 * 1000;
+
+const TRADE_ANALYSIS_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "ticker",
+    "company_name",
+    "date",
+    "overall_score",
+    "categories",
+    "technical",
+    "fundamental",
+    "thesis",
+    "risk",
+  ],
+  properties: {
+    ticker: { type: "string" },
+    company_name: { type: "string" },
+    date: { type: "string" },
+    overall_score: { type: "number" },
+    categories: {
+      type: "object",
+      additionalProperties: false,
+      required: [
+        "Technical Strength",
+        "Fundamental Quality",
+        "Sentiment & Momentum",
+        "Risk Profile",
+        "Thesis Conviction",
+      ],
+      properties: {
+        "Technical Strength": { $ref: "#/$defs/score_category" },
+        "Fundamental Quality": { $ref: "#/$defs/score_category" },
+        "Sentiment & Momentum": { $ref: "#/$defs/score_category" },
+        "Risk Profile": { $ref: "#/$defs/score_category" },
+        "Thesis Conviction": { $ref: "#/$defs/score_category" },
+      },
+    },
+    technical: {
+      type: "object",
+      additionalProperties: false,
+      required: ["key_levels", "indicators"],
+      properties: {
+        key_levels: { type: "array", items: { $ref: "#/$defs/key_level" } },
+        indicators: { type: "array", items: { $ref: "#/$defs/indicator" } },
+      },
+    },
+    fundamental: {
+      type: "object",
+      additionalProperties: false,
+      required: ["metrics", "valuation_assessment", "moat"],
+      properties: {
+        metrics: { type: "array", items: { $ref: "#/$defs/metric" } },
+        valuation_assessment: { type: "string" },
+        moat: {
+          type: "object",
+          additionalProperties: false,
+          required: ["rating", "sources"],
+          properties: {
+            rating: { type: "string" },
+            sources: { type: "array", items: { type: "string" } },
+          },
+        },
+      },
+    },
+    thesis: {
+      type: "object",
+      additionalProperties: false,
+      required: ["bull_case", "bear_case", "catalysts", "entry_exit"],
+      properties: {
+        bull_case: { type: "array", items: { type: "string" } },
+        bear_case: { type: "array", items: { type: "string" } },
+        catalysts: { type: "array", items: { $ref: "#/$defs/catalyst" } },
+        entry_exit: {
+          type: "object",
+          additionalProperties: false,
+          required: ["entry_price", "target_price", "stop_loss", "timeframe"],
+          properties: {
+            entry_price: { type: "string" },
+            target_price: { type: "string" },
+            stop_loss: { type: "string" },
+            timeframe: { type: "string" },
+          },
+        },
+      },
+    },
+    risk: {
+      type: "object",
+      additionalProperties: false,
+      required: [
+        "risk_reward_ratio",
+        "recommended_position_size",
+        "max_drawdown_scenario",
+        "volatility",
+        "correlation",
+        "sizing_methodology",
+        "scenarios",
+      ],
+      properties: {
+        risk_reward_ratio: { type: "string" },
+        recommended_position_size: { type: "string" },
+        max_drawdown_scenario: { type: "string" },
+        volatility: { type: "string" },
+        correlation: { type: "string" },
+        sizing_methodology: { type: "string" },
+        scenarios: { type: "array", items: { $ref: "#/$defs/scenario" } },
+      },
+    },
+  },
+  $defs: {
+    score_category: {
+      type: "object",
+      additionalProperties: false,
+      required: ["score", "weight"],
+      properties: {
+        score: { type: "number" },
+        weight: { type: "string" },
+      },
+    },
+    key_level: {
+      type: "object",
+      additionalProperties: false,
+      required: ["level", "price", "notes"],
+      properties: {
+        level: { type: "string" },
+        price: { type: "string" },
+        notes: { type: "string" },
+      },
+    },
+    indicator: {
+      type: "object",
+      additionalProperties: false,
+      required: ["indicator", "value", "interpretation"],
+      properties: {
+        indicator: { type: "string" },
+        value: { type: "string" },
+        interpretation: { type: "string" },
+      },
+    },
+    metric: {
+      type: "object",
+      additionalProperties: false,
+      required: ["metric", "value", "sector_avg", "assessment"],
+      properties: {
+        metric: { type: "string" },
+        value: { type: "string" },
+        sector_avg: { type: "string" },
+        assessment: { type: "string" },
+      },
+    },
+    catalyst: {
+      type: "object",
+      additionalProperties: false,
+      required: ["event", "date", "impact"],
+      properties: {
+        event: { type: "string" },
+        date: { type: "string" },
+        impact: { type: "string" },
+      },
+    },
+    scenario: {
+      type: "object",
+      additionalProperties: false,
+      required: ["scenario", "probability", "return", "trigger"],
+      properties: {
+        scenario: { type: "string" },
+        probability: { type: "string" },
+        return: { type: "string" },
+        trigger: { type: "string" },
+      },
+    },
+  },
+};
+
+const RESEARCH_DEBATE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["bull_argument", "bear_argument", "research_manager"],
+  properties: {
+    bull_argument: { type: "string" },
+    bear_argument: { type: "string" },
+    research_manager: {
+      type: "object",
+      additionalProperties: false,
+      required: [
+        "verdict",
+        "final_score",
+        "final_signal",
+        "confidence",
+        "score_adjustments",
+        "key_watch_items",
+      ],
+      properties: {
+        verdict: { type: "string" },
+        final_score: { type: "number" },
+        final_signal: {
+          type: "string",
+          enum: ["STRONG BUY", "BUY", "HOLD", "CAUTION", "AVOID"],
+        },
+        confidence: {
+          type: "string",
+          enum: ["Low", "Medium", "High"],
+        },
+        score_adjustments: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["dimension", "from", "to", "reason"],
+            properties: {
+              dimension: { type: "string" },
+              from: { type: "number" },
+              to: { type: "number" },
+              reason: { type: "string" },
+            },
+          },
+        },
+        key_watch_items: {
+          type: "array",
+          items: { type: "string" },
+        },
+      },
+    },
+  },
+};
 
 const ANALYSIS_PIPELINE = [
   {
@@ -172,6 +397,15 @@ const ANALYSIS_PIPELINE = [
     active: "Bull/bear thesis analysis live",
     done: "Thesis analysis returned",
     error: "Thesis analysis interrupted",
+  },
+  {
+    key: "research_debate",
+    badge: "BD",
+    name: "Bull/Bear Debate",
+    waiting: "Waiting for agent output",
+    active: "Bull, bear, and manager reviewing",
+    done: "Research debate resolved",
+    error: "Research debate interrupted",
   },
   {
     key: "synthesis",
@@ -1746,6 +1980,7 @@ function renderMarkdownFromAnalysis(data) {
   const fundamental = data.fundamental || {};
   const thesis = data.thesis || {};
   const risk = data.risk || {};
+  const debate = data.research_debate || null;
   const marketSentiment = data.market_sentiment || {};
   const fearGreed = marketSentiment.fear_greed || null;
   const xSocial = marketSentiment.social_x || null;
@@ -1850,6 +2085,37 @@ function renderMarkdownFromAnalysis(data) {
   lines.push("", "### Bear Case");
   for (const item of thesis.bear_case || []) lines.push(`- ${item}`);
 
+  if (debate?.research_manager) {
+    lines.push(
+      "",
+      "## Research Debate",
+      "",
+      "### Bull Analyst",
+      "",
+      debate.bull_argument || "No bull argument returned.",
+      "",
+      "### Bear Analyst",
+      "",
+      debate.bear_argument || "No bear argument returned.",
+      "",
+      "### Research Manager Verdict",
+      "",
+      `- **Final Signal**: ${debate.research_manager.final_signal || signal}`,
+      `- **Confidence**: ${debate.research_manager.confidence || "--"}`,
+      `- **Verdict**: ${debate.research_manager.verdict || "--"}`
+    );
+    if (Array.isArray(debate.research_manager.score_adjustments) && debate.research_manager.score_adjustments.length) {
+      lines.push("", "#### Score Adjustments");
+      for (const item of debate.research_manager.score_adjustments) {
+        lines.push(`- **${item.dimension}**: ${item.from}/100 -> ${item.to}/100 (${item.reason})`);
+      }
+    }
+    if (Array.isArray(debate.research_manager.key_watch_items) && debate.research_manager.key_watch_items.length) {
+      lines.push("", "#### Watch Items");
+      for (const item of debate.research_manager.key_watch_items) lines.push(`- ${item}`);
+    }
+  }
+
   lines.push("", "### Catalysts");
   for (const cat of thesis.catalysts || []) lines.push(`- ${cat.event} (${cat.date}): ${cat.impact}`);
 
@@ -1910,6 +2176,259 @@ function xaiClientConfig() {
   };
 }
 
+function buildXaiAnalysisRequest({ cfg, systemPrompt, userPrompt }) {
+  return {
+    endpoint: `${cfg.baseUrl}/responses`,
+    body: {
+      model: cfg.model,
+      temperature: 0.2,
+      max_output_tokens: 3500,
+      store: false,
+      input: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ],
+      text: {
+        format: {
+          type: "json_schema",
+          name: "trade_analysis",
+          schema: TRADE_ANALYSIS_SCHEMA,
+          strict: true,
+        },
+      },
+    },
+  };
+}
+
+function buildXaiDebateRequest({ cfg, ticker, analysis, promptSnapshot }) {
+  const systemPrompt = [
+    "You are an adversarial research desk.",
+    "Return exactly one object matching the provided JSON schema.",
+    "The Bull Analyst must argue the strongest evidence-supported upside case.",
+    "The Bear Analyst must challenge assumptions and argue the strongest evidence-supported downside case.",
+    "The Research Manager must decide which case is stronger and may adjust the final score conservatively.",
+    "Do not invent facts. Use only the analysis and verified source context provided.",
+  ].join(" ");
+  const userPrompt = [
+    `Run a bull/bear research debate for ${ticker}.`,
+    "",
+    "Bull Analyst: identify the strongest upside evidence and why it matters.",
+    "Bear Analyst: identify the strongest invalidation risks and weak assumptions.",
+    "Research Manager: weigh both sides, produce a verdict, final score, final signal, confidence, score adjustments, and watch items.",
+    "",
+    "Current structured analysis:",
+    JSON.stringify(analysis, null, 2),
+    "",
+    promptSnapshot ? "Verified source context:\n" + JSON.stringify(promptSnapshot, null, 2) : "",
+  ].join("\n");
+
+  return {
+    endpoint: `${cfg.baseUrl}/responses`,
+    body: {
+      model: cfg.model,
+      temperature: 0.15,
+      max_output_tokens: 2600,
+      store: false,
+      input: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ],
+      text: {
+        format: {
+          type: "json_schema",
+          name: "research_debate",
+          schema: RESEARCH_DEBATE_SCHEMA,
+          strict: true,
+        },
+      },
+    },
+  };
+}
+
+function parseXaiStructuredResponse(payload) {
+  let json;
+  try {
+    json = JSON.parse(payload);
+  } catch {
+    throw new Error("xAI response was not valid JSON.");
+  }
+
+  const outputText = [];
+  if (typeof json.output_text === "string") outputText.push(json.output_text);
+  for (const item of Array.isArray(json.output) ? json.output : []) {
+    if (typeof item?.text === "string") outputText.push(item.text);
+    for (const content of Array.isArray(item?.content) ? item.content : []) {
+      if (typeof content?.text === "string") outputText.push(content.text);
+    }
+  }
+
+  const text = outputText.join("\n").trim();
+  if (!text) throw new Error("xAI response did not include output_text.");
+
+  const parsed = extractFirstJsonObject(text);
+  if (!parsed) throw new Error("xAI structured output was not parseable JSON.");
+  return parsed;
+}
+
+function validateResearchDebate(data) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error("Research debate must be an object.");
+  }
+  for (const key of ["bull_argument", "bear_argument", "research_manager"]) {
+    if (!safeText(data[key], "")) {
+      throw new Error(`Research debate missing required field: ${key}`);
+    }
+  }
+  const manager = data.research_manager;
+  if (!manager || typeof manager !== "object" || Array.isArray(manager)) {
+    throw new Error("Research debate missing required field: research_manager");
+  }
+  for (const key of ["verdict", "final_signal", "confidence"]) {
+    if (!safeText(manager[key], "")) {
+      throw new Error(`Research debate missing required field: research_manager.${key}`);
+    }
+  }
+  if (!Number.isFinite(Number(manager.final_score))) {
+    throw new Error("Research debate missing numeric field: research_manager.final_score");
+  }
+  if (!Array.isArray(manager.score_adjustments)) {
+    throw new Error("Research debate missing required array: research_manager.score_adjustments");
+  }
+  if (!Array.isArray(manager.key_watch_items)) {
+    throw new Error("Research debate missing required array: research_manager.key_watch_items");
+  }
+
+  return {
+    bull_argument: safeText(data.bull_argument),
+    bear_argument: safeText(data.bear_argument),
+    research_manager: {
+      verdict: safeText(manager.verdict),
+      final_score: clampScore(manager.final_score, 0),
+      final_signal: safeText(manager.final_signal, signalForScore(manager.final_score)),
+      confidence: safeText(manager.confidence, "Medium"),
+      score_adjustments: manager.score_adjustments
+        .filter((item) => item && typeof item === "object")
+        .map((item) => ({
+          dimension: safeText(item.dimension),
+          from: clampScore(item.from, 0),
+          to: clampScore(item.to, 0),
+          reason: safeText(item.reason),
+        }))
+        .filter((item) => item.dimension && item.reason)
+        .slice(0, 6),
+      key_watch_items: manager.key_watch_items.map((item) => safeText(item)).filter(Boolean).slice(0, 6),
+    },
+  };
+}
+
+function boundedScoreAdjustment(current, proposed, maxDelta = 15) {
+  const base = clampScore(current, 0);
+  const next = clampScore(proposed, base);
+  if (next > base + maxDelta) return base + maxDelta;
+  if (next < base - maxDelta) return base - maxDelta;
+  return next;
+}
+
+function applyResearchDebate(analysis, debate) {
+  const validated = validateResearchDebate(debate);
+  const next = {
+    ...analysis,
+    categories: { ...(analysis.categories || {}) },
+    research_debate: validated,
+  };
+
+  for (const adjustment of validated.research_manager.score_adjustments) {
+    const current = next.categories[adjustment.dimension];
+    if (!current || typeof current !== "object") continue;
+    next.categories[adjustment.dimension] = {
+      ...current,
+      score: boundedScoreAdjustment(current.score, adjustment.to, 12),
+    };
+  }
+
+  next.overall_score = boundedScoreAdjustment(analysis.overall_score, validated.research_manager.final_score, 15);
+  next.research_debate.research_manager.initial_score = clampScore(analysis.overall_score, 0);
+  next.research_debate.research_manager.final_score = next.overall_score;
+  next.research_debate.research_manager.final_signal = signalForScore(next.overall_score);
+  return next;
+}
+
+function validateStructuredAnalysis(data) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error("Structured analysis must be an object.");
+  }
+
+  const requiredTopLevel = [
+    "ticker",
+    "company_name",
+    "date",
+    "overall_score",
+    "categories",
+    "technical",
+    "fundamental",
+    "thesis",
+    "risk",
+  ];
+  for (const key of requiredTopLevel) {
+    if (data[key] === undefined || data[key] === null) {
+      throw new Error(`Structured analysis missing required field: ${key}`);
+    }
+  }
+
+  const arrayFields = [
+    ["technical", "key_levels"],
+    ["technical", "indicators"],
+    ["fundamental", "metrics"],
+    ["thesis", "bull_case"],
+    ["thesis", "bear_case"],
+    ["thesis", "catalysts"],
+    ["risk", "scenarios"],
+  ];
+  for (const [parent, child] of arrayFields) {
+    if (!Array.isArray(data[parent]?.[child])) {
+      throw new Error(`Structured analysis missing required array: ${parent}.${child}`);
+    }
+  }
+
+  if (!data.thesis?.entry_exit || typeof data.thesis.entry_exit !== "object") {
+    throw new Error("Structured analysis missing required field: thesis.entry_exit");
+  }
+
+  return data;
+}
+
+async function requestResearchDebateFromXai({ cfg, ticker, analysis, promptSnapshot, job }) {
+  const request = buildXaiDebateRequest({ cfg, ticker, analysis, promptSnapshot });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 180000);
+  if (job) updateJob(job, { status: "running", stage: "research_debate" });
+  appendJobLog(job, `Research debate: bull, bear, and manager using ${cfg.model}`);
+  appendJobLog(job, `Calling ${request.endpoint} for research debate`);
+
+  let response;
+  try {
+    response = await fetch(request.endpoint, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${cfg.apiKey}`,
+      },
+      body: JSON.stringify(request.body),
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  const payload = await response.text();
+  if (!response.ok) {
+    const snippet = payload.slice(0, 400);
+    throw new Error(`xAI research debate error ${response.status}: ${snippet}`);
+  }
+
+  return validateResearchDebate(parseXaiStructuredResponse(payload));
+}
+
 async function requestAnalysisFromXai(ticker, job) {
   const cfg = xaiClientConfig();
   if (!cfg.apiKey) {
@@ -1937,33 +2456,25 @@ async function requestAnalysisFromXai(ticker, job) {
     "Use arrays with at least: technical.key_levels (5), technical.indicators (6), fundamental.metrics (6), thesis.bull_case (3), thesis.bear_case (3), thesis.catalysts (3), risk.scenarios (3).",
     `Set date to ${formatDisplayDate()}.`,
     promptSnapshot ? "Use this verified market snapshot as factual context:\n" + JSON.stringify(promptSnapshot, null, 2) : "",
-    "Return JSON only.",
+    "Return an object that matches the provided JSON schema.",
   ].join("\n");
 
-  const endpoint = `${cfg.baseUrl}/chat/completions`;
+  const request = buildXaiAnalysisRequest({ cfg, systemPrompt, userPrompt });
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 180000);
-  appendJobLog(job, `External engine: xAI model ${cfg.model}`);
-  appendJobLog(job, `Calling ${endpoint}`);
+  appendJobLog(job, `External engine: xAI model ${cfg.model} with structured output`);
+  appendJobLog(job, `Calling ${request.endpoint}`);
 
   let response;
   try {
-    response = await fetch(endpoint, {
+    response = await fetch(request.endpoint, {
       method: "POST",
       signal: controller.signal,
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${cfg.apiKey}`,
       },
-      body: JSON.stringify({
-        model: cfg.model,
-        temperature: 0.2,
-        max_tokens: 2600,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userPrompt },
-        ],
-      }),
+      body: JSON.stringify(request.body),
     });
   } finally {
     clearTimeout(timeout);
@@ -1975,25 +2486,9 @@ async function requestAnalysisFromXai(ticker, job) {
     throw new Error(`xAI API error ${response.status}: ${snippet}`);
   }
 
-  let parsed = null;
-  try {
-    const json = JSON.parse(payload);
-    const rawContent = json?.choices?.[0]?.message?.content;
-    const content = Array.isArray(rawContent)
-      ? rawContent
-          .map((part) => (typeof part === "string" ? part : part?.text || ""))
-          .join("\n")
-      : rawContent;
-    parsed = extractFirstJsonObject(content);
-  } catch {
-    parsed = null;
-  }
-
-  if (!parsed) {
-    throw new Error("xAI response did not include parseable JSON analysis.");
-  }
+  const parsed = validateStructuredAnalysis(parseXaiStructuredResponse(payload));
   const normalized = normalizeAnalysisData(parsed, ticker);
-  const merged = mergeSourcedAnalysis(normalized, marketContext);
+  let merged = mergeSourcedAnalysis(normalized, marketContext);
 
   if (!hasSourcedTechnical(merged)) {
     throw new Error(`Technical market data did not populate for ${ticker}. No PDF was generated to avoid placeholder analysis.`);
@@ -2001,6 +2496,9 @@ async function requestAnalysisFromXai(ticker, job) {
   if (!hasSourcedFundamentals(merged)) {
     throw new Error(`Fundamental market data did not populate for ${ticker}. No PDF was generated to avoid placeholder analysis.`);
   }
+
+  const debate = await requestResearchDebateFromXai({ cfg, ticker, analysis: merged, promptSnapshot, job });
+  merged = applyResearchDebate(merged, debate);
 
   return merged;
 }
@@ -2142,6 +2640,47 @@ function pickLatestReport(reports) {
   return [...reports].sort((a, b) => reportUpdatedAt(b) - reportUpdatedAt(a))[0] || null;
 }
 
+function asFiniteNumber(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function summarizeReportInsight(meta) {
+  const debate = meta?.research_debate || null;
+  const manager = debate?.research_manager || null;
+  if (!debate || !manager) {
+    return {
+      hasResearchDebate: false,
+      initialScore: null,
+      finalScore: asFiniteNumber(meta?.overall_score),
+      scoreDelta: null,
+      finalSignal: null,
+      confidence: null,
+      verdict: null,
+      bullArgument: null,
+      bearArgument: null,
+      scoreAdjustments: [],
+      watchItems: [],
+    };
+  }
+
+  const finalScore = asFiniteNumber(manager.final_score) ?? asFiniteNumber(meta?.overall_score);
+  const initialScore = asFiniteNumber(manager.initial_score);
+  return {
+    hasResearchDebate: true,
+    initialScore,
+    finalScore,
+    scoreDelta: initialScore !== null && finalScore !== null ? finalScore - initialScore : null,
+    finalSignal: manager.final_signal || null,
+    confidence: manager.confidence || null,
+    verdict: manager.verdict || null,
+    bullArgument: debate.bull_argument || null,
+    bearArgument: debate.bear_argument || null,
+    scoreAdjustments: Array.isArray(manager.score_adjustments) ? manager.score_adjustments.slice(0, 5) : [],
+    watchItems: Array.isArray(manager.key_watch_items) ? manager.key_watch_items.slice(0, 5) : [],
+  };
+}
+
 function removeStaleLegacyFiles(files) {
   if (!files || !files.pdf) return files || {};
   const newestAnalysisMtime = Math.max(files.md?.mtimeMs || 0, files.json?.mtimeMs || 0);
@@ -2157,6 +2696,7 @@ function reportFromRun(run) {
   if (!run) return null;
   const files = run.files || {};
   if (!files.md && !files.json && !files.pdf) return null;
+  const meta = run.meta || null;
   return {
     ticker: run.ticker,
     runId: run.id,
@@ -2165,7 +2705,8 @@ function reportFromRun(run) {
     createdAt: run.createdAt,
     completedAt: run.completedAt || run.updatedAt,
     files,
-    meta: run.meta || null,
+    meta,
+    insight: summarizeReportInsight(meta),
   };
 }
 
@@ -2251,6 +2792,7 @@ function listLegacyAnalyses() {
     }
 
     item.files = removeStaleLegacyFiles(item.files);
+    item.insight = summarizeReportInsight(item.meta);
 
     if (Object.keys(item.files).length > 0) out.push(item);
   }
@@ -2334,10 +2876,14 @@ function buildAnalysisPipeline(jobLike) {
       agentKeys.forEach((key) => mark(key, "error"));
     } else if (stage === "synthesis") {
       markDone(["request_ticket", "discovery", ...agentKeys]);
+      mark("research_debate", "done");
       mark("synthesis", "error");
     } else if (stage === "pdf_forge") {
-      markDone(["request_ticket", "discovery", ...agentKeys, "synthesis"]);
+      markDone(["request_ticket", "discovery", ...agentKeys, "research_debate", "synthesis"]);
       mark("pdf_forge", "error");
+    } else if (stage === "research_debate") {
+      markDone(["request_ticket", "discovery", ...agentKeys]);
+      mark("research_debate", "error");
     } else {
       mark("request_ticket", "error");
     }
@@ -2360,19 +2906,27 @@ function buildAnalysisPipeline(jobLike) {
   if (stage === "agent_swarm") {
     markDone(["request_ticket", "discovery"]);
     agentKeys.forEach((key) => mark(key, "active"));
+    mark("research_debate", "queued");
+    mark("synthesis", "waiting");
+    return ANALYSIS_PIPELINE.map((def) => byKey.get(def.key));
+  }
+
+  if (stage === "research_debate") {
+    markDone(["request_ticket", "discovery", ...agentKeys]);
+    mark("research_debate", "active");
     mark("synthesis", "queued");
     return ANALYSIS_PIPELINE.map((def) => byKey.get(def.key));
   }
 
   if (stage === "synthesis") {
-    markDone(["request_ticket", "discovery", ...agentKeys]);
+    markDone(["request_ticket", "discovery", ...agentKeys, "research_debate"]);
     mark("synthesis", "active");
     mark("pdf_forge", "queued");
     return ANALYSIS_PIPELINE.map((def) => byKey.get(def.key));
   }
 
   if (stage === "pdf_forge") {
-    markDone(["request_ticket", "discovery", ...agentKeys, "synthesis"]);
+    markDone(["request_ticket", "discovery", ...agentKeys, "research_debate", "synthesis"]);
     mark("pdf_forge", "active");
     return ANALYSIS_PIPELINE.map((def) => byKey.get(def.key));
   }
@@ -2959,7 +3513,10 @@ if (require.main === module) {
 }
 
 module.exports = {
+  applyResearchDebate,
   buildFundamentalRead,
+  buildXaiDebateRequest,
+  buildXaiAnalysisRequest,
   buildAnalysisPipeline,
   buildTechnicalRead,
   formatPercentRatio,
@@ -2968,7 +3525,12 @@ module.exports = {
   hasSourcedTechnical,
   mergeSourcedAnalysis,
   normalizeTicker,
+  parseXaiStructuredResponse,
   pickLatestReport,
   removeStaleLegacyFiles,
+  renderMarkdownFromAnalysis,
   safeJoin,
+  summarizeReportInsight,
+  validateResearchDebate,
+  validateStructuredAnalysis,
 };
