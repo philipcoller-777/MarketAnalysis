@@ -10,6 +10,7 @@ Local market analysis dashboard for stocks and crypto with markdown, JSON, and P
 - Runs a Phase 2 bull/bear research debate pass after the first analysis
 - Shows a Debate Summary panel with bull case, bear case, manager verdict, score delta, signal, confidence, and watch items
 - Marks saved reports as `Debated` or `No Debate` in the dashboard report list
+- Adds a paper-only Execution Agent that turns the final analysis into a reviewable execution ticket
 - Supports stock ticker analysis and crypto analysis in the same workflow
 - Adds crypto-native enrichment from:
   - X / Twitter recent-search sentiment
@@ -54,6 +55,7 @@ Optional enrichments:
 - `X_BEARER_TOKEN` for X / Twitter social sentiment
 - `CMC_API_KEY` for CoinMarketCap market context
 - `COINGECKO_API_KEY` for CoinGecko enrichment
+- `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, and `ALPACA_BASE_URL` for read-only Alpaca paper account context
 - `MARKET_PYTHON` for a specific Python interpreter path
 
 The xAI analysis path uses the Responses API with a strict JSON schema before
@@ -63,6 +65,16 @@ debate pass and includes the Research Manager verdict in markdown/PDF output.
 The debate pass stores a `research_debate` object in the JSON report. New reports
 use that object to show the dashboard Debate Summary panel and the report-list
 `Debated` badge. Older saved reports remain usable and are marked `No Debate`.
+
+The execution-planning pass stores an `execution_plan` object in the JSON report.
+This is a paper-only planning artifact: it does not submit orders or automate
+trading. When Alpaca paper keys are configured, the server pulls a sanitized,
+read-only account snapshot for the dashboard and Execution Agent context:
+account status, market clock, buying power, equity, positions count, and open
+orders count. API keys, account IDs, and order IDs are stripped before anything
+is sent to the browser or the model prompt. The dashboard renders the ticket as
+an Execution Agent panel with action, order type, entry, stop, target, sizing,
+risk, rationale, and safeguards.
 
 ## Running The App
 
@@ -110,13 +122,20 @@ Fresh analysis runs move through these dashboard stages:
 6. Risk
 7. Thesis
 8. Bull/Bear Debate
-9. Synthesis
-10. PDF Forge
+9. Execution Agent
+10. Synthesis
+11. PDF Forge
 
 The Bull/Bear Debate stage is the Phase 2 pass. It challenges the initial
 analysis from both sides, then records a Research Manager verdict. When present,
 the dashboard renders the debate directly above the PDF preview and the PDF
 includes a Research Debate section.
+
+The Execution Agent stage creates a paper ticket after the debate verdict. It
+can classify the result as `PAPER_READY`, `WATCH_ONLY`, `NO_TRADE`, or
+`NOT_BROKER_ELIGIBLE`. Alpaca integration is read-only in this phase, so the app
+can use account context for sizing awareness without placing or canceling
+broker orders.
 
 ## Output Files
 

@@ -4,10 +4,13 @@ const assert = require("node:assert/strict");
 const path = require("path");
 
 const {
+  alpacaClientConfig,
+  buildAlpacaRequest,
   buildAnalysisPipeline,
   buildFundamentalRead,
   buildTechnicalRead,
   buildXaiDebateRequest,
+  buildXaiExecutionRequest,
   buildXaiAnalysisRequest,
   hasSourcedFundamentals,
   hasSourcedTechnical,
@@ -15,11 +18,14 @@ const {
   normalizeTicker,
   parseXaiStructuredResponse,
   pickLatestReport,
+  applyExecutionPlan,
   applyResearchDebate,
   removeStaleLegacyFiles,
   renderMarkdownFromAnalysis,
   safeJoin,
+  sanitizeAlpacaSnapshot,
   summarizeReportInsight,
+  validateExecutionPlan,
   validateResearchDebate,
   validateStructuredAnalysis,
 } = require("./server");
@@ -62,6 +68,14 @@ test("buildAnalysisPipeline shows research debate as its own active stage", () =
   const pipeline = buildAnalysisPipeline({ status: "running", stage: "research_debate" });
   assert.equal(pipeline.find((card) => card.key === "trade-thesis")?.state, "done");
   assert.equal(pipeline.find((card) => card.key === "research_debate")?.state, "active");
+  assert.equal(pipeline.find((card) => card.key === "execution_agent")?.state, "queued");
+  assert.equal(pipeline.find((card) => card.key === "synthesis")?.state, "waiting");
+});
+
+test("buildAnalysisPipeline shows execution agent as its own active stage", () => {
+  const pipeline = buildAnalysisPipeline({ status: "running", stage: "execution_agent" });
+  assert.equal(pipeline.find((card) => card.key === "research_debate")?.state, "done");
+  assert.equal(pipeline.find((card) => card.key === "execution_agent")?.state, "active");
   assert.equal(pipeline.find((card) => card.key === "synthesis")?.state, "queued");
 });
 
@@ -178,6 +192,77 @@ test("buildXaiDebateRequest uses a strict research debate schema", () => {
   assert.match(request.body.input[1].content, /Bear Analyst/i);
 });
 
+test("buildXaiExecutionRequest uses a strict non-broker execution schema", () => {
+  const request = buildXaiExecutionRequest({
+    cfg: { baseUrl: "https://api.x.ai/v1", model: "grok-4.3" },
+    ticker: "BTC",
+    analysis: { ticker: "BTC", overall_score: 72, thesis: {}, risk: {}, research_debate: {} },
+    promptSnapshot: { asset: { ticker: "BTC" } },
+    brokerSnapshot: { configured: true, connected: true, paper: true, account: { buying_power: "100000" } },
+  });
+
+  assert.equal(request.endpoint, "https://api.x.ai/v1/responses");
+  assert.equal(request.body.text.format.name, "execution_plan");
+  assert.equal(request.body.text.format.strict, true);
+  assert.equal(request.body.text.format.schema.required.includes("order_ticket"), true);
+  assert.match(request.body.input[0].content, /Do not submit/i);
+  assert.match(request.body.input[1].content, /paper-trading execution ticket/i);
+  assert.match(request.body.input[1].content, /Broker account context/i);
+  assert.doesNotMatch(request.body.input[1].content, /SECRET|alpaca-secret/i);
+});
+
+test("alpacaClientConfig supports paper credentials without exposing secrets in sanitized output", () => {
+  const cfg = alpacaClientConfig({
+    ALPACA_API_KEY: "paper-key",
+    ALPACA_SECRET_KEY: "paper-secret",
+    ALPACA_BASE_URL: "https://paper-api.alpaca.markets",
+  });
+
+  assert.equal(cfg.configured, true);
+  assert.equal(cfg.paper, true);
+  assert.equal(cfg.apiKey, "paper-key");
+  assert.equal(cfg.secretKey, "paper-secret");
+
+  const request = buildAlpacaRequest(cfg, "/v2/account");
+  assert.equal(request.url, "https://paper-api.alpaca.markets/v2/account");
+  assert.equal(request.headers["APCA-API-KEY-ID"], "paper-key");
+  assert.equal(request.headers["APCA-API-SECRET-KEY"], "paper-secret");
+});
+
+test("sanitizeAlpacaSnapshot strips credentials and keeps dashboard fields", () => {
+  const sanitized = sanitizeAlpacaSnapshot({
+    configured: true,
+    connected: true,
+    paper: true,
+    baseUrl: "https://paper-api.alpaca.markets",
+    apiKey: "must-not-leak",
+    secretKey: "must-not-leak",
+    account: {
+      id: "account-id",
+      status: "ACTIVE",
+      currency: "USD",
+      buying_power: "100000",
+      equity: "50000",
+      portfolio_value: "50000",
+      cash: "25000",
+      daytrade_count: 0,
+      pattern_day_trader: false,
+      trading_blocked: false,
+      transfers_blocked: false,
+      account_blocked: false,
+    },
+    clock: { is_open: true, next_open: "2026-05-10T09:30:00-04:00", next_close: "2026-05-09T16:00:00-04:00" },
+    positions: [{ symbol: "AAPL", qty: "2", market_value: "400", unrealized_pl: "10" }],
+    orders: [{ id: "order-id", symbol: "AAPL", side: "buy", qty: "1", status: "new" }],
+  });
+
+  const text = JSON.stringify(sanitized);
+  assert.equal(sanitized.connected, true);
+  assert.equal(sanitized.account.buying_power, "100000");
+  assert.equal(sanitized.positions[0].symbol, "AAPL");
+  assert.doesNotMatch(text, /must-not-leak|account-id|order-id/);
+});
+
 test("applyResearchDebate attaches verdict and can adjust the final score", () => {
   const analysis = {
     ticker: "BTC",
@@ -234,6 +319,72 @@ test("renderMarkdownFromAnalysis includes the research debate section", () => {
   assert.match(markdown, /Bull case wins narrowly/);
 });
 
+test("applyExecutionPlan attaches a validated execution plan", () => {
+  const next = applyExecutionPlan(
+    { ticker: "BTC", overall_score: 72 },
+    validateExecutionPlan({
+      status: "PAPER_READY",
+      action: "BUY",
+      broker_mode: "paper_only",
+      order_ticket: {
+        order_type: "LIMIT",
+        time_in_force: "DAY",
+        entry: "68000",
+        stop_loss: "64200",
+        take_profit: "73500",
+        position_size_pct: 3,
+        risk_pct: 1,
+        max_allocation_pct: 5,
+      },
+      confidence: "Medium",
+      rationale: "Setup is actionable only as a paper order ticket.",
+      safeguards: ["Manual confirmation required"],
+      broker_notes: ["No live order submitted"],
+    })
+  );
+
+  assert.equal(next.execution_plan.status, "PAPER_READY");
+  assert.equal(next.execution_plan.order_ticket.order_type, "LIMIT");
+  assert.equal(next.execution_plan.order_ticket.position_size_pct, 3);
+});
+
+test("renderMarkdownFromAnalysis includes the execution plan section", () => {
+  const markdown = renderMarkdownFromAnalysis({
+    ticker: "BTC",
+    company_name: "Bitcoin",
+    date: "May 09, 2026",
+    overall_score: 72,
+    categories: {},
+    technical: {},
+    fundamental: {},
+    thesis: {},
+    risk: {},
+    execution_plan: {
+      status: "PAPER_READY",
+      action: "BUY",
+      broker_mode: "paper_only",
+      order_ticket: {
+        order_type: "LIMIT",
+        time_in_force: "DAY",
+        entry: "68000",
+        stop_loss: "64200",
+        take_profit: "73500",
+        position_size_pct: 3,
+        risk_pct: 1,
+        max_allocation_pct: 5,
+      },
+      confidence: "Medium",
+      rationale: "Paper-ready execution ticket.",
+      safeguards: ["Manual confirmation required"],
+      broker_notes: ["No live order submitted"],
+    },
+  });
+
+  assert.match(markdown, /## Execution Plan/);
+  assert.match(markdown, /PAPER_READY/);
+  assert.match(markdown, /Manual confirmation required/);
+});
+
 test("summarizeReportInsight exposes compact debate metadata", () => {
   const insight = summarizeReportInsight({
     overall_score: 72,
@@ -250,6 +401,25 @@ test("summarizeReportInsight exposes compact debate metadata", () => {
         key_watch_items: ["Confirm volume expansion", "Watch macro liquidity"],
       },
     },
+    execution_plan: {
+      status: "PAPER_READY",
+      action: "BUY",
+      broker_mode: "paper_only",
+      order_ticket: {
+        order_type: "LIMIT",
+        time_in_force: "DAY",
+        entry: "68000",
+        stop_loss: "64200",
+        take_profit: "73500",
+        position_size_pct: 3,
+        risk_pct: 1,
+        max_allocation_pct: 5,
+      },
+      confidence: "Medium",
+      rationale: "Paper-ready ticket.",
+      safeguards: ["Manual confirmation required"],
+      broker_notes: ["No live order submitted"],
+    },
   });
 
   assert.equal(insight.hasResearchDebate, true);
@@ -259,6 +429,9 @@ test("summarizeReportInsight exposes compact debate metadata", () => {
   assert.equal(insight.finalSignal, "BUY");
   assert.equal(insight.confidence, "Medium");
   assert.equal(insight.watchItems.length, 2);
+  assert.equal(insight.hasExecutionPlan, true);
+  assert.equal(insight.executionPlan.status, "PAPER_READY");
+  assert.equal(insight.executionPlan.action, "BUY");
 });
 
 test("buildTechnicalRead derives real levels and indicators from candles", () => {

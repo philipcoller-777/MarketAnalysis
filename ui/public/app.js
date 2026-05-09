@@ -77,6 +77,15 @@ const IDLE_PIPELINE = [
     detail: "Bull, bear, and research manager will challenge the initial thesis.",
   },
   {
+    key: "execution_agent",
+    badge: "EX",
+    name: "Execution Agent",
+    state: "waiting",
+    chip: "IDLE",
+    summary: "Waiting for debate verdict",
+    detail: "The execution agent will create a paper-only ticket with no broker submission.",
+  },
+  {
     key: "synthesis",
     badge: "SX",
     name: "Synthesis",
@@ -103,6 +112,7 @@ const state = {
   statusPollTimer: null,
   currentJob: null,
   lastStatus: null,
+  brokerStatus: null,
   previewTicker: null,
   requestRunning: false,
 };
@@ -145,6 +155,16 @@ function fmtScoreDelta(delta) {
   return `${Math.round(delta)}`;
 }
 
+function fmtMoney(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "--";
+  return n.toLocaleString(undefined, {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: n >= 1000 ? 0 : 2,
+  });
+}
+
 function normalizeTickerInput(value) {
   const cleaned = String(value || "").trim().toUpperCase();
   return cleaned || "";
@@ -179,7 +199,12 @@ function isLegacyStatusPayload(statusData = state.lastStatus) {
 function isStaleBackendPayload(statusData = state.lastStatus) {
   if (!statusData || isLegacyStatusPayload(statusData)) return false;
   const pipelines = [statusData.savedPipeline, statusData.activeJob?.pipeline].filter(Array.isArray);
-  return pipelines.some((pipeline) => pipeline.length > 0 && !pipeline.some((card) => card.key === "research_debate"));
+  return pipelines.some(
+    (pipeline) =>
+      pipeline.length > 0 &&
+      (!pipeline.some((card) => card.key === "research_debate") ||
+        !pipeline.some((card) => card.key === "execution_agent"))
+  );
 }
 
 function savedFileUrl(file) {
@@ -215,7 +240,7 @@ function renderMission(statusData = state.lastStatus) {
     pill = "Restart";
   } else if (isStaleBackendPayload(statusData)) {
     title = `Backend restart required for ${state.ticker}`;
-    subtitle = "The frontend is current, but the running server is older and cannot start the Bull/Bear Debate stage. Close and rerun start-dashboard.bat.";
+    subtitle = "The frontend is current, but the running server is older and cannot start all Phase 2/Execution stages. Close and rerun start-dashboard.bat.";
     pill = "Stale";
   } else if (liveJob) {
     const runLabel = liveJob.runId ? `Run ${String(liveJob.runId).slice(0, 8)}` : "Live run";
@@ -260,6 +285,12 @@ function renderMission(statusData = state.lastStatus) {
       `).join("")}
     </div>
   `;
+}
+
+function executionStatusClass(status) {
+  if (status === "PAPER_READY") return "is-ready";
+  if (status === "NO_TRADE" || status === "NOT_BROKER_ELIGIBLE") return "is-blocked";
+  return "is-watch";
 }
 
 function renderDebateSummary(statusData = state.lastStatus) {
@@ -361,6 +392,187 @@ function renderDebateSummary(statusData = state.lastStatus) {
   `;
 }
 
+function renderExecutionSummary(statusData = state.lastStatus) {
+  const host = $("execution-summary");
+  if (!host) return;
+
+  const liveJob = activeJobForTicker(statusData);
+  const latestSaved = latestSavedForTicker(statusData);
+  const plan = latestSaved?.insight?.executionPlan || null;
+
+  if (liveJob) {
+    host.hidden = false;
+    host.className = "execution-summary is-pending";
+    host.innerHTML = `
+      <div class="execution-title-row">
+        <div>
+          <div class="execution-title">Execution Agent</div>
+          <div class="execution-sub">Paper-only ticket appears after the fresh run completes. No broker order is submitted.</div>
+        </div>
+        <div class="execution-status">Pending</div>
+      </div>
+    `;
+    return;
+  }
+
+  if (!latestSaved) {
+    host.hidden = true;
+    host.innerHTML = "";
+    return;
+  }
+
+  if (!plan) {
+    host.hidden = false;
+    host.className = "execution-summary is-empty";
+    host.innerHTML = `
+      <div class="execution-title-row">
+        <div>
+          <div class="execution-title">Execution Agent</div>
+          <div class="execution-sub">This saved report was generated before the execution-planning stage.</div>
+        </div>
+        <div class="execution-status is-muted">No Plan</div>
+      </div>
+    `;
+    return;
+  }
+
+  const statusClass = executionStatusClass(plan.status);
+  const safeguards = (plan.safeguards || []).slice(0, 3);
+  const notes = (plan.brokerNotes || []).slice(0, 3);
+  host.hidden = false;
+  host.className = `execution-summary ${statusClass}`;
+  host.innerHTML = `
+    <div class="execution-title-row">
+      <div>
+        <div class="execution-title">Execution Agent</div>
+        <div class="execution-sub">Paper-only execution plan for ${escapeHtml(latestSaved.ticker)}. Broker submission is disabled.</div>
+      </div>
+      <div class="execution-status ${statusClass}">${escapeHtml(plan.status || "--")}</div>
+    </div>
+
+    <div class="execution-ticket-grid">
+      <div class="execution-ticket-cell">
+        <span>Action</span>
+        <strong>${escapeHtml(plan.action || "--")}</strong>
+      </div>
+      <div class="execution-ticket-cell">
+        <span>Order</span>
+        <strong>${escapeHtml(plan.orderType || "--")}</strong>
+      </div>
+      <div class="execution-ticket-cell">
+        <span>Entry</span>
+        <strong>${escapeHtml(plan.entry || "--")}</strong>
+      </div>
+      <div class="execution-ticket-cell">
+        <span>Stop</span>
+        <strong>${escapeHtml(plan.stopLoss || "--")}</strong>
+      </div>
+      <div class="execution-ticket-cell">
+        <span>Target</span>
+        <strong>${escapeHtml(plan.takeProfit || "--")}</strong>
+      </div>
+      <div class="execution-ticket-cell">
+        <span>Size</span>
+        <strong>${plan.positionSizePct ?? "--"}%</strong>
+      </div>
+      <div class="execution-ticket-cell">
+        <span>Risk</span>
+        <strong>${plan.riskPct ?? "--"}%</strong>
+      </div>
+      <div class="execution-ticket-cell">
+        <span>Confidence</span>
+        <strong>${escapeHtml(plan.confidence || "--")}</strong>
+      </div>
+    </div>
+
+    <div class="execution-rationale">${escapeHtml(plan.rationale || "--")}</div>
+
+    ${safeguards.length ? `
+      <div class="execution-list">
+        <div class="execution-label">Safeguards</div>
+        <div>${safeguards.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>
+      </div>
+    ` : ""}
+    ${notes.length ? `
+      <div class="execution-list">
+        <div class="execution-label">Broker Notes</div>
+        <div>${notes.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>
+      </div>
+    ` : ""}
+  `;
+}
+
+function renderBrokerStatus(broker = state.brokerStatus) {
+  const host = $("broker");
+  if (!host) return;
+
+  if (!broker) {
+    host.innerHTML = `
+      <div class="broker-card is-muted">
+        <div class="broker-row">
+          <span>Alpaca</span>
+          <strong>Checking</strong>
+        </div>
+      </div>
+    `;
+    return;
+  }
+
+  if (!broker.configured) {
+    host.innerHTML = `
+      <div class="broker-card is-muted">
+        <div class="broker-row">
+          <span>Alpaca</span>
+          <strong>Not Configured</strong>
+        </div>
+        <div class="broker-note">${escapeHtml(broker.error || "Missing local credentials")}</div>
+      </div>
+    `;
+    return;
+  }
+
+  const account = broker.account || {};
+  const clock = broker.clock || {};
+  const positions = Array.isArray(broker.positions) ? broker.positions.length : 0;
+  const orders = Array.isArray(broker.orders) ? broker.orders.length : 0;
+  const marketLabel = clock.is_open ? "Market Open" : "Market Closed";
+  const mode = broker.paper ? "Paper" : "Live URL";
+  const warning = broker.paper ? "" : `<div class="broker-note is-warn">Live Alpaca URL detected. Order submission remains disabled.</div>`;
+
+  host.innerHTML = `
+    <div class="broker-card ${broker.connected ? "is-on" : "is-error"}">
+      <div class="broker-row">
+        <span>Alpaca</span>
+        <strong>${broker.connected ? "Connected" : "Offline"}</strong>
+      </div>
+      <div class="broker-pills">
+        <span>${escapeHtml(mode)}</span>
+        <span>${escapeHtml(marketLabel)}</span>
+      </div>
+      <div class="broker-grid">
+        <div>
+          <span>Equity</span>
+          <strong>${fmtMoney(account.equity || account.portfolio_value)}</strong>
+        </div>
+        <div>
+          <span>Buying Power</span>
+          <strong>${fmtMoney(account.buying_power)}</strong>
+        </div>
+        <div>
+          <span>Positions</span>
+          <strong>${positions}</strong>
+        </div>
+        <div>
+          <span>Open Orders</span>
+          <strong>${orders}</strong>
+        </div>
+      </div>
+      ${broker.error ? `<div class="broker-note">${escapeHtml(broker.error)}</div>` : ""}
+      ${warning}
+    </div>
+  `;
+}
+
 async function apiGet(pathname) {
   const response = await fetch(pathname, { cache: "no-store" });
   if (!response.ok) throw new Error(await response.text());
@@ -375,6 +587,24 @@ async function apiPost(pathname, body) {
   });
   if (!response.ok) throw new Error(await response.text());
   return response.json();
+}
+
+async function refreshBrokerStatus() {
+  try {
+    const data = await apiGet("/api/broker/status");
+    state.brokerStatus = data.broker || null;
+    renderBrokerStatus(state.brokerStatus);
+    return state.brokerStatus;
+  } catch (error) {
+    state.brokerStatus = {
+      configured: false,
+      connected: false,
+      paper: true,
+      error: String(error),
+    };
+    renderBrokerStatus(state.brokerStatus);
+    return state.brokerStatus;
+  }
 }
 
 function clearJobStream() {
@@ -459,6 +689,7 @@ async function refreshReports() {
     const score = report?.meta?.overall_score;
     const badge = badgeForScore(score);
     const hasDebate = !!(report?.insight?.hasResearchDebate || report?.meta?.research_debate);
+    const executionStatus = report?.insight?.executionPlan?.status || null;
     const note = report?.meta?.date || (report.source === "run" ? "Saved run snapshot" : "Legacy saved files");
     const div = document.createElement("div");
     div.className = "report";
@@ -473,6 +704,7 @@ async function refreshReports() {
       </div>
       <div class="report-markers">
         <div class="debate-mini ${hasDebate ? "is-on" : "is-off"}">${hasDebate ? "Debated" : "No Debate"}</div>
+        <div class="execution-mini ${executionStatus ? executionStatusClass(executionStatus) : "is-off"}">${escapeHtml(executionStatus || "No Plan")}</div>
         <div class="badge ${badge.cls}">${escapeHtml(badge.text)}</div>
       </div>
     `;
@@ -533,6 +765,7 @@ async function refreshStatus(options = {}) {
   updateArtifactLinks(data);
   renderMission(data);
   renderDebateSummary(data);
+  renderExecutionSummary(data);
 
   if (loadPreview) {
     const latestSaved = latestSavedForTicker(data);
@@ -559,6 +792,7 @@ function setTicker(value, options = {}) {
   if (!tickerLooksValid(state.ticker)) {
     renderMission({ savedPipeline: IDLE_PIPELINE });
     renderDebateSummary(null);
+    renderExecutionSummary(null);
     return;
   }
 
@@ -578,6 +812,7 @@ function finishActiveRun({ loadPreview }) {
   setBusyState();
   refreshReports().catch(() => {});
   refreshStatus({ loadPreview }).catch(() => {});
+  refreshBrokerStatus().catch(() => {});
 }
 
 function handleJobUpdate(job, options = {}) {
@@ -585,6 +820,8 @@ function handleJobUpdate(job, options = {}) {
   state.currentJob = job;
   state.requestRunning = isActiveJob(job);
   renderMission();
+  renderDebateSummary();
+  renderExecutionSummary();
   setBusyState();
 
   if (job.status === "done") {
@@ -704,6 +941,7 @@ function wire() {
 
   $("btn-refresh").onclick = async () => {
     await refreshReports();
+    await refreshBrokerStatus();
     await refreshStatus({ loadPreview: false });
   };
   $("btn-request").onclick = () => requestAnalysis().catch((error) => appendJobLog(String(error)));
@@ -712,6 +950,8 @@ function wire() {
   setBusyState();
   renderMission({ savedPipeline: IDLE_PIPELINE });
   renderDebateSummary(null);
+  renderExecutionSummary(null);
+  renderBrokerStatus(null);
 }
 
 async function boot() {
@@ -721,6 +961,7 @@ async function boot() {
     "Request Analysis launches a fresh end-to-end run. Review Last Analysis opens the latest saved snapshot."
   );
   await refreshReports();
+  await refreshBrokerStatus();
   await refreshStatus({ loadPreview: false });
 }
 

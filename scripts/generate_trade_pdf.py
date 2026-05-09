@@ -838,6 +838,44 @@ def generate_report(data, output_path):
     ]
     ee_table.setStyle(standard_table_style(ee_style))
     elements.append(ee_table)
+    elements.append(Spacer(1, 12))
+
+    execution_plan = data.get("execution_plan") or {}
+    execution_ticket = execution_plan.get("order_ticket") or {}
+    if execution_plan and execution_ticket:
+        elements.append(Paragraph("Execution Plan", S["subheading"]))
+        status = safe_str(execution_plan.get("status", "--"))
+        action = safe_str(execution_plan.get("action", "--"))
+        confidence = safe_str(execution_plan.get("confidence", "--"))
+        rationale = safe_str(execution_plan.get("rationale", "--"))
+        elements.append(Paragraph(
+            f"<b>Status:</b> {escape_paragraph_text(status)} | "
+            f"<b>Action:</b> {escape_paragraph_text(action)} | "
+            f"<b>Confidence:</b> {escape_paragraph_text(confidence)}",
+            S["body_small"],
+        ))
+        elements.append(Paragraph(escape_paragraph_text(rationale), S["body_small"]))
+        elements.append(Spacer(1, 6))
+        exec_data = [
+            ["Ticket Field", "Value"],
+            ["Order Type", safe_str(execution_ticket.get("order_type", "--"))],
+            ["Time in Force", safe_str(execution_ticket.get("time_in_force", "--"))],
+            ["Entry", safe_str(execution_ticket.get("entry", "--"))],
+            ["Stop Loss", safe_str(execution_ticket.get("stop_loss", "--"))],
+            ["Take Profit", safe_str(execution_ticket.get("take_profit", "--"))],
+            ["Position Size", f"{safe_str(execution_ticket.get('position_size_pct', '--'))}%"],
+            ["Risk", f"{safe_str(execution_ticket.get('risk_pct', '--'))}%"],
+            ["Max Allocation", f"{safe_str(execution_ticket.get('max_allocation_pct', '--'))}%"],
+        ]
+        exec_table = Table(exec_data, colWidths=[160, 200])
+        exec_table.setStyle(standard_table_style([
+            ("ALIGN", (1, 0), (1, -1), "CENTER"),
+            ("FONTNAME", (1, 1), (1, -1), "Helvetica-Bold"),
+        ]))
+        elements.append(exec_table)
+        safeguards = execution_plan.get("safeguards", [])[:3]
+        for item in safeguards:
+            elements.append(Paragraph(f"&bull; Safeguard: {escape_paragraph_text(item)}", S["bullet"]))
 
     elements.append(PageBreak())
 

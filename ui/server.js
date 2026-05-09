@@ -73,6 +73,7 @@ const DEFAULT_PYTHON =
 const DEFAULT_ANALYSIS_ENGINE = (process.env.ANALYSIS_ENGINE || "auto").trim().toLowerCase();
 const DEFAULT_XAI_BASE_URL = (process.env.XAI_BASE_URL || process.env.XAI_API_BASE || "https://api.x.ai/v1").trim().replace(/\/+$/, "");
 const DEFAULT_XAI_MODEL = (process.env.XAI_MODEL || "grok-4.3").trim();
+const DEFAULT_ALPACA_BASE_URL = (process.env.ALPACA_BASE_URL || "https://paper-api.alpaca.markets").trim().replace(/\/+$/, "");
 const DEFAULT_BINANCE_BASE_URL = (process.env.BINANCE_API_BASE || "https://api.binance.com").trim().replace(/\/+$/, "");
 const DEFAULT_COINGECKO_BASE_URL = (process.env.COINGECKO_API_BASE || "https://api.coingecko.com/api/v3").trim().replace(/\/+$/, "");
 const DEFAULT_COINGECKO_API_KEY = (
@@ -108,6 +109,7 @@ const DATA_CACHE = new Map();
 const FEAR_GREED_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const CMC_CACHE_TTL_MS = 5 * 60 * 1000;
 const X_CACHE_TTL_MS = 15 * 60 * 1000;
+const ALPACA_CACHE_TTL_MS = 15 * 1000;
 
 const TRADE_ANALYSIS_SCHEMA = {
   type: "object",
@@ -334,6 +336,72 @@ const RESEARCH_DEBATE_SCHEMA = {
   },
 };
 
+const EXECUTION_PLAN_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "status",
+    "action",
+    "broker_mode",
+    "order_ticket",
+    "confidence",
+    "rationale",
+    "safeguards",
+    "broker_notes",
+  ],
+  properties: {
+    status: {
+      type: "string",
+      enum: ["PAPER_READY", "WATCH_ONLY", "NO_TRADE", "NOT_BROKER_ELIGIBLE"],
+    },
+    action: {
+      type: "string",
+      enum: ["BUY", "SELL", "HOLD", "AVOID", "WATCH"],
+    },
+    broker_mode: {
+      type: "string",
+      enum: ["paper_only", "not_connected"],
+    },
+    order_ticket: {
+      type: "object",
+      additionalProperties: false,
+      required: [
+        "order_type",
+        "time_in_force",
+        "entry",
+        "stop_loss",
+        "take_profit",
+        "position_size_pct",
+        "risk_pct",
+        "max_allocation_pct",
+      ],
+      properties: {
+        order_type: {
+          type: "string",
+          enum: ["MARKET", "LIMIT", "STOP_LIMIT", "NONE"],
+        },
+        time_in_force: {
+          type: "string",
+          enum: ["DAY", "GTC", "NONE"],
+        },
+        entry: { type: "string" },
+        stop_loss: { type: "string" },
+        take_profit: { type: "string" },
+        position_size_pct: { type: "number" },
+        risk_pct: { type: "number" },
+        max_allocation_pct: { type: "number" },
+      },
+    },
+    confidence: {
+      type: "string",
+      enum: ["Low", "Medium", "High"],
+    },
+    rationale: { type: "string" },
+    safeguards: { type: "array", items: { type: "string" } },
+    broker_notes: { type: "array", items: { type: "string" } },
+  },
+};
+
 const ANALYSIS_PIPELINE = [
   {
     key: "request_ticket",
@@ -408,6 +476,15 @@ const ANALYSIS_PIPELINE = [
     error: "Research debate interrupted",
   },
   {
+    key: "execution_agent",
+    badge: "EX",
+    name: "Execution Agent",
+    waiting: "Waiting for debate verdict",
+    active: "Building paper execution ticket",
+    done: "Paper execution plan created",
+    error: "Execution planning interrupted",
+  },
+  {
     key: "synthesis",
     badge: "SX",
     name: "Synthesis",
@@ -444,6 +521,38 @@ async function loadCached(key, ttlMs, loader) {
     expiresAt: Date.now() + ttlMs,
   });
   return value;
+}
+
+async function fetchJsonWithTimeout(endpoint, options = {}, timeoutMs = 20000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  let response;
+  try {
+    response = await fetch(endpoint, {
+      ...options,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  const text = await response.text();
+  let body = null;
+  if (text) {
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = { raw: text.slice(0, 500) };
+    }
+  }
+  if (!response.ok) {
+    const message = body?.message || body?.error || `${response.status} ${response.statusText}`;
+    const err = new Error(message);
+    err.status = response.status;
+    err.body = body;
+    throw err;
+  }
+  return body;
 }
 
 function statSafe(filePath) {
@@ -506,6 +615,10 @@ function sendText(res, code, text, contentType = "text/plain; charset=utf-8") {
     "Cache-Control": "no-store",
   });
   res.end(payload);
+}
+
+function isPlainObject(value) {
+  return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
 function contentTypeFor(filePath) {
@@ -577,6 +690,15 @@ function extractFirstJsonObject(text) {
 function safeText(value, fallback = "") {
   const out = String(value || "").trim();
   return out || fallback;
+}
+
+function pickFields(source, fields) {
+  const out = {};
+  if (!isPlainObject(source)) return out;
+  for (const field of fields) {
+    if (source[field] !== undefined && source[field] !== null) out[field] = source[field];
+  }
+  return out;
 }
 
 function isPlaceholderText(value) {
@@ -1981,6 +2103,7 @@ function renderMarkdownFromAnalysis(data) {
   const thesis = data.thesis || {};
   const risk = data.risk || {};
   const debate = data.research_debate || null;
+  const executionPlan = data.execution_plan || null;
   const marketSentiment = data.market_sentiment || {};
   const fearGreed = marketSentiment.fear_greed || null;
   const xSocial = marketSentiment.social_x || null;
@@ -2129,7 +2252,43 @@ function renderMarkdownFromAnalysis(data) {
     `| Price Target | ${thesis.entry_exit?.target_price || "--"} |`,
     `| Stop Loss | ${thesis.entry_exit?.stop_loss || "--"} |`,
     `| Timeframe | ${thesis.entry_exit?.timeframe || "--"} |`,
-    "",
+    ""
+  );
+
+  if (executionPlan?.order_ticket) {
+    const ticket = executionPlan.order_ticket || {};
+    lines.push(
+      "## Execution Plan",
+      "",
+      `- **Status**: ${executionPlan.status || "--"}`,
+      `- **Action**: ${executionPlan.action || "--"}`,
+      `- **Mode**: ${executionPlan.broker_mode || "paper_only"}`,
+      `- **Confidence**: ${executionPlan.confidence || "--"}`,
+      `- **Rationale**: ${executionPlan.rationale || "--"}`,
+      "",
+      "| Ticket Field | Value |",
+      "|--------------|-------|",
+      `| Order Type | ${ticket.order_type || "--"} |`,
+      `| Time in Force | ${ticket.time_in_force || "--"} |`,
+      `| Entry | ${ticket.entry || "--"} |`,
+      `| Stop Loss | ${ticket.stop_loss || "--"} |`,
+      `| Take Profit | ${ticket.take_profit || "--"} |`,
+      `| Position Size | ${ticket.position_size_pct ?? "--"}% |`,
+      `| Risk | ${ticket.risk_pct ?? "--"}% |`,
+      `| Max Allocation | ${ticket.max_allocation_pct ?? "--"}% |`
+    );
+    if (Array.isArray(executionPlan.safeguards) && executionPlan.safeguards.length) {
+      lines.push("", "### Execution Safeguards");
+      for (const item of executionPlan.safeguards) lines.push(`- ${item}`);
+    }
+    if (Array.isArray(executionPlan.broker_notes) && executionPlan.broker_notes.length) {
+      lines.push("", "### Broker Notes");
+      for (const item of executionPlan.broker_notes) lines.push(`- ${item}`);
+    }
+    lines.push("");
+  }
+
+  lines.push(
     "## Risk Assessment",
     "",
     `- **Risk/Reward**: ${risk.risk_reward_ratio || "--"}`,
@@ -2174,6 +2333,180 @@ function xaiClientConfig() {
     model: DEFAULT_XAI_MODEL,
     baseUrl: DEFAULT_XAI_BASE_URL,
   };
+}
+
+function alpacaClientConfig(env = process.env) {
+  const baseUrl = String(env.ALPACA_BASE_URL || DEFAULT_ALPACA_BASE_URL || "https://paper-api.alpaca.markets")
+    .trim()
+    .replace(/\/+$/, "");
+  const apiKey = String(env.ALPACA_API_KEY || env.LOCAL_ALPACA_API_KEY || "").trim();
+  const secretKey = String(env.ALPACA_SECRET_KEY || env.LOCAL_ALPACA_SECRET_KEY || "").trim();
+
+  return {
+    apiKey,
+    secretKey,
+    baseUrl,
+    configured: !!apiKey && !!secretKey,
+    paper: /paper-api\.alpaca\.markets/i.test(baseUrl) || /paper/i.test(baseUrl),
+  };
+}
+
+function buildAlpacaRequest(cfg, pathname, query = null) {
+  const cleanPath = String(pathname || "").startsWith("/") ? String(pathname) : `/${pathname || ""}`;
+  const urlObj = new URL(cleanPath, `${cfg.baseUrl}/`);
+  if (query && typeof query === "object") {
+    for (const [key, value] of Object.entries(query)) {
+      if (value !== undefined && value !== null && value !== "") {
+        urlObj.searchParams.set(key, String(value));
+      }
+    }
+  }
+
+  return {
+    url: urlObj.toString(),
+    headers: {
+      Accept: "application/json",
+      "APCA-API-KEY-ID": cfg.apiKey,
+      "APCA-API-SECRET-KEY": cfg.secretKey,
+    },
+  };
+}
+
+function sanitizeAlpacaSnapshot(snapshot = {}) {
+  const account = snapshot.account
+    ? pickFields(snapshot.account, [
+        "status",
+        "currency",
+        "buying_power",
+        "regt_buying_power",
+        "daytrading_buying_power",
+        "non_marginable_buying_power",
+        "cash",
+        "portfolio_value",
+        "equity",
+        "last_equity",
+        "long_market_value",
+        "short_market_value",
+        "initial_margin",
+        "maintenance_margin",
+        "daytrade_count",
+        "pattern_day_trader",
+        "trading_blocked",
+        "transfers_blocked",
+        "account_blocked",
+      ])
+    : null;
+
+  const clock = snapshot.clock
+    ? pickFields(snapshot.clock, ["timestamp", "is_open", "next_open", "next_close"])
+    : null;
+
+  const positions = Array.isArray(snapshot.positions)
+    ? snapshot.positions
+        .slice(0, 25)
+        .map((position) =>
+          pickFields(position, [
+            "symbol",
+            "asset_class",
+            "exchange",
+            "qty",
+            "side",
+            "market_value",
+            "cost_basis",
+            "avg_entry_price",
+            "unrealized_pl",
+            "unrealized_plpc",
+            "current_price",
+            "lastday_price",
+            "change_today",
+          ])
+        )
+    : [];
+
+  const orders = Array.isArray(snapshot.orders)
+    ? snapshot.orders
+        .slice(0, 25)
+        .map((order) =>
+          pickFields(order, [
+            "symbol",
+            "side",
+            "type",
+            "time_in_force",
+            "qty",
+            "filled_qty",
+            "status",
+            "submitted_at",
+            "filled_at",
+            "limit_price",
+            "stop_price",
+          ])
+        )
+    : [];
+
+  return {
+    configured: !!snapshot.configured,
+    connected: !!snapshot.connected,
+    paper: !!snapshot.paper,
+    baseUrl: safeText(snapshot.baseUrl, DEFAULT_ALPACA_BASE_URL),
+    error: snapshot.error ? safeText(snapshot.error) : null,
+    account,
+    clock,
+    positions,
+    orders,
+    updatedAt: snapshot.updatedAt || Date.now(),
+  };
+}
+
+async function getAlpacaSnapshot() {
+  const cfg = alpacaClientConfig();
+  if (!cfg.configured) {
+    return sanitizeAlpacaSnapshot({
+      configured: false,
+      connected: false,
+      paper: cfg.paper,
+      baseUrl: cfg.baseUrl,
+      error: "Missing ALPACA_API_KEY or ALPACA_SECRET_KEY.",
+    });
+  }
+
+  const accountReq = buildAlpacaRequest(cfg, "/v2/account");
+  const clockReq = buildAlpacaRequest(cfg, "/v2/clock");
+  const positionsReq = buildAlpacaRequest(cfg, "/v2/positions");
+  const ordersReq = buildAlpacaRequest(cfg, "/v2/orders", { status: "open", limit: 50, nested: true });
+
+  const [account, clock, positions, orders] = await Promise.allSettled([
+    fetchJsonWithTimeout(accountReq.url, { headers: accountReq.headers }),
+    fetchJsonWithTimeout(clockReq.url, { headers: clockReq.headers }),
+    fetchJsonWithTimeout(positionsReq.url, { headers: positionsReq.headers }),
+    fetchJsonWithTimeout(ordersReq.url, { headers: ordersReq.headers }),
+  ]);
+
+  const errors = [];
+  for (const [label, result] of [
+    ["account", account],
+    ["clock", clock],
+    ["positions", positions],
+    ["orders", orders],
+  ]) {
+    if (result.status === "rejected") errors.push(`${label}: ${safeText(result.reason?.message, "request failed")}`);
+  }
+
+  return sanitizeAlpacaSnapshot({
+    configured: true,
+    connected: account.status === "fulfilled",
+    paper: cfg.paper,
+    baseUrl: cfg.baseUrl,
+    account: account.status === "fulfilled" ? account.value : null,
+    clock: clock.status === "fulfilled" ? clock.value : null,
+    positions: positions.status === "fulfilled" && Array.isArray(positions.value) ? positions.value : [],
+    orders: orders.status === "fulfilled" && Array.isArray(orders.value) ? orders.value : [],
+    error: errors.length ? errors.join("; ") : null,
+    updatedAt: Date.now(),
+  });
+}
+
+async function getCachedAlpacaSnapshot() {
+  return loadCached("alpaca:snapshot", ALPACA_CACHE_TTL_MS, getAlpacaSnapshot);
 }
 
 function buildXaiAnalysisRequest({ cfg, systemPrompt, userPrompt }) {
@@ -2245,6 +2578,57 @@ function buildXaiDebateRequest({ cfg, ticker, analysis, promptSnapshot }) {
   };
 }
 
+function buildXaiExecutionRequest({ cfg, ticker, analysis, promptSnapshot, brokerSnapshot = null }) {
+  const sanitizedBroker = brokerSnapshot ? sanitizeAlpacaSnapshot(brokerSnapshot) : null;
+  const systemPrompt = [
+    "You are a paper-trading execution planner for an educational dashboard.",
+    "Return exactly one object matching the provided JSON schema.",
+    "Do not submit, imply submission of, or instruct automatic submission of any broker order.",
+    "Create only a paper-trading execution ticket that a human could review later.",
+    "Use conservative sizing. Respect the analysis risk section and research debate verdict.",
+    "If the asset is not suitable for Alpaca-style paper execution, set status to NOT_BROKER_ELIGIBLE.",
+  ].join(" ");
+  const userPrompt = [
+    `Create a paper-trading execution ticket for ${ticker}.`,
+    "",
+    "Decide whether the report is PAPER_READY, WATCH_ONLY, NO_TRADE, or NOT_BROKER_ELIGIBLE.",
+    "If not actionable, set order_type and time_in_force to NONE and explain what must change.",
+    "Keep position_size_pct, risk_pct, and max_allocation_pct conservative and numeric.",
+    "Include safeguards that must be checked before any future manual paper order.",
+    "",
+    "Current structured analysis, including any research debate:",
+    JSON.stringify(analysis, null, 2),
+    "",
+    sanitizedBroker
+      ? "Broker account context (sanitized, read-only Alpaca snapshot):\n" + JSON.stringify(sanitizedBroker, null, 2)
+      : "Broker account context: not connected or unavailable. Build a paper-only ticket without account-specific sizing.",
+    "",
+    promptSnapshot ? "Verified source context:\n" + JSON.stringify(promptSnapshot, null, 2) : "",
+  ].join("\n");
+
+  return {
+    endpoint: `${cfg.baseUrl}/responses`,
+    body: {
+      model: cfg.model,
+      temperature: 0.1,
+      max_output_tokens: 2000,
+      store: false,
+      input: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ],
+      text: {
+        format: {
+          type: "json_schema",
+          name: "execution_plan",
+          schema: EXECUTION_PLAN_SCHEMA,
+          strict: true,
+        },
+      },
+    },
+  };
+}
+
 function parseXaiStructuredResponse(payload) {
   let json;
   try {
@@ -2268,6 +2652,75 @@ function parseXaiStructuredResponse(payload) {
   const parsed = extractFirstJsonObject(text);
   if (!parsed) throw new Error("xAI structured output was not parseable JSON.");
   return parsed;
+}
+
+function validateExecutionPlan(data) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error("Execution plan must be an object.");
+  }
+  for (const key of ["status", "action", "broker_mode", "order_ticket", "confidence", "rationale"]) {
+    if (data[key] === undefined || data[key] === null || (typeof data[key] === "string" && !data[key].trim())) {
+      throw new Error(`Execution plan missing required field: ${key}`);
+    }
+  }
+  if (!Array.isArray(data.safeguards)) {
+    throw new Error("Execution plan missing required array: safeguards");
+  }
+  if (!Array.isArray(data.broker_notes)) {
+    throw new Error("Execution plan missing required array: broker_notes");
+  }
+
+  const ticket = data.order_ticket;
+  if (!ticket || typeof ticket !== "object" || Array.isArray(ticket)) {
+    throw new Error("Execution plan missing required field: order_ticket");
+  }
+  for (const key of ["order_type", "time_in_force", "entry", "stop_loss", "take_profit"]) {
+    if (ticket[key] === undefined || ticket[key] === null) {
+      throw new Error(`Execution plan missing required field: order_ticket.${key}`);
+    }
+  }
+  for (const key of ["position_size_pct", "risk_pct", "max_allocation_pct"]) {
+    if (!Number.isFinite(Number(ticket[key]))) {
+      throw new Error(`Execution plan missing numeric field: order_ticket.${key}`);
+    }
+  }
+
+  const allowedStatus = new Set(["PAPER_READY", "WATCH_ONLY", "NO_TRADE", "NOT_BROKER_ELIGIBLE"]);
+  const allowedAction = new Set(["BUY", "SELL", "HOLD", "AVOID", "WATCH"]);
+  const allowedOrderType = new Set(["MARKET", "LIMIT", "STOP_LIMIT", "NONE"]);
+  const allowedTif = new Set(["DAY", "GTC", "NONE"]);
+
+  const status = safeText(data.status, "WATCH_ONLY").toUpperCase();
+  const action = safeText(data.action, "WATCH").toUpperCase();
+  const orderType = safeText(ticket.order_type, "NONE").toUpperCase();
+  const timeInForce = safeText(ticket.time_in_force, "NONE").toUpperCase();
+
+  const normalized = {
+    status: allowedStatus.has(status) ? status : "WATCH_ONLY",
+    action: allowedAction.has(action) ? action : "WATCH",
+    broker_mode: safeText(data.broker_mode, "paper_only") === "not_connected" ? "not_connected" : "paper_only",
+    order_ticket: {
+      order_type: allowedOrderType.has(orderType) ? orderType : "NONE",
+      time_in_force: allowedTif.has(timeInForce) ? timeInForce : "NONE",
+      entry: safeText(ticket.entry, "--"),
+      stop_loss: safeText(ticket.stop_loss, "--"),
+      take_profit: safeText(ticket.take_profit, "--"),
+      position_size_pct: clampScore(ticket.position_size_pct, 0),
+      risk_pct: clampScore(ticket.risk_pct, 0),
+      max_allocation_pct: clampScore(ticket.max_allocation_pct, 0),
+    },
+    confidence: safeText(data.confidence, "Medium"),
+    rationale: safeText(data.rationale),
+    safeguards: data.safeguards.map((item) => safeText(item)).filter(Boolean).slice(0, 6),
+    broker_notes: data.broker_notes.map((item) => safeText(item)).filter(Boolean).slice(0, 6),
+  };
+
+  if (normalized.status !== "PAPER_READY") {
+    normalized.order_ticket.order_type = "NONE";
+    normalized.order_ticket.time_in_force = "NONE";
+  }
+
+  return normalized;
 }
 
 function validateResearchDebate(data) {
@@ -2353,6 +2806,13 @@ function applyResearchDebate(analysis, debate) {
   return next;
 }
 
+function applyExecutionPlan(analysis, executionPlan) {
+  return {
+    ...analysis,
+    execution_plan: validateExecutionPlan(executionPlan),
+  };
+}
+
 function validateStructuredAnalysis(data) {
   if (!data || typeof data !== "object" || Array.isArray(data)) {
     throw new Error("Structured analysis must be an object.");
@@ -2429,6 +2889,45 @@ async function requestResearchDebateFromXai({ cfg, ticker, analysis, promptSnaps
   return validateResearchDebate(parseXaiStructuredResponse(payload));
 }
 
+async function requestExecutionPlanFromXai({ cfg, ticker, analysis, promptSnapshot, brokerSnapshot, job }) {
+  const request = buildXaiExecutionRequest({ cfg, ticker, analysis, promptSnapshot, brokerSnapshot });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 180000);
+  if (job) updateJob(job, { status: "running", stage: "execution_agent" });
+  appendJobLog(job, `Execution agent: building paper-only ticket using ${cfg.model}`);
+  if (brokerSnapshot?.connected) {
+    appendJobLog(job, "Execution agent: using sanitized Alpaca paper account context");
+  } else if (brokerSnapshot?.configured) {
+    appendJobLog(job, `Execution agent: Alpaca context unavailable (${brokerSnapshot.error || "connection failed"})`);
+  } else {
+    appendJobLog(job, "Execution agent: Alpaca paper account not configured");
+  }
+  appendJobLog(job, `Calling ${request.endpoint} for execution plan`);
+
+  let response;
+  try {
+    response = await fetch(request.endpoint, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${cfg.apiKey}`,
+      },
+      body: JSON.stringify(request.body),
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  const payload = await response.text();
+  if (!response.ok) {
+    const snippet = payload.slice(0, 400);
+    throw new Error(`xAI execution plan error ${response.status}: ${snippet}`);
+  }
+
+  return validateExecutionPlan(parseXaiStructuredResponse(payload));
+}
+
 async function requestAnalysisFromXai(ticker, job) {
   const cfg = xaiClientConfig();
   if (!cfg.apiKey) {
@@ -2499,6 +2998,24 @@ async function requestAnalysisFromXai(ticker, job) {
 
   const debate = await requestResearchDebateFromXai({ cfg, ticker, analysis: merged, promptSnapshot, job });
   merged = applyResearchDebate(merged, debate);
+  const brokerSnapshot = await getCachedAlpacaSnapshot().catch((error) =>
+    sanitizeAlpacaSnapshot({
+      configured: alpacaClientConfig().configured,
+      connected: false,
+      paper: alpacaClientConfig().paper,
+      baseUrl: alpacaClientConfig().baseUrl,
+      error: error?.message || String(error),
+    })
+  );
+  const executionPlan = await requestExecutionPlanFromXai({
+    cfg,
+    ticker,
+    analysis: merged,
+    promptSnapshot,
+    brokerSnapshot,
+    job,
+  });
+  merged = applyExecutionPlan(merged, executionPlan);
 
   return merged;
 }
@@ -2648,9 +3165,31 @@ function asFiniteNumber(value) {
 function summarizeReportInsight(meta) {
   const debate = meta?.research_debate || null;
   const manager = debate?.research_manager || null;
+  const executionPlan = meta?.execution_plan || null;
+  const executionSummary = executionPlan
+    ? {
+        status: executionPlan.status || null,
+        action: executionPlan.action || null,
+        brokerMode: executionPlan.broker_mode || null,
+        orderType: executionPlan.order_ticket?.order_type || null,
+        timeInForce: executionPlan.order_ticket?.time_in_force || null,
+        entry: executionPlan.order_ticket?.entry || null,
+        stopLoss: executionPlan.order_ticket?.stop_loss || null,
+        takeProfit: executionPlan.order_ticket?.take_profit || null,
+        positionSizePct: asFiniteNumber(executionPlan.order_ticket?.position_size_pct),
+        riskPct: asFiniteNumber(executionPlan.order_ticket?.risk_pct),
+        maxAllocationPct: asFiniteNumber(executionPlan.order_ticket?.max_allocation_pct),
+        confidence: executionPlan.confidence || null,
+        rationale: executionPlan.rationale || null,
+        safeguards: Array.isArray(executionPlan.safeguards) ? executionPlan.safeguards.slice(0, 5) : [],
+        brokerNotes: Array.isArray(executionPlan.broker_notes) ? executionPlan.broker_notes.slice(0, 5) : [],
+      }
+    : null;
   if (!debate || !manager) {
     return {
       hasResearchDebate: false,
+      hasExecutionPlan: !!executionPlan,
+      executionPlan: executionSummary,
       initialScore: null,
       finalScore: asFiniteNumber(meta?.overall_score),
       scoreDelta: null,
@@ -2668,6 +3207,8 @@ function summarizeReportInsight(meta) {
   const initialScore = asFiniteNumber(manager.initial_score);
   return {
     hasResearchDebate: true,
+    hasExecutionPlan: !!executionPlan,
+    executionPlan: executionSummary,
     initialScore,
     finalScore,
     scoreDelta: initialScore !== null && finalScore !== null ? finalScore - initialScore : null,
@@ -2877,13 +3418,17 @@ function buildAnalysisPipeline(jobLike) {
     } else if (stage === "synthesis") {
       markDone(["request_ticket", "discovery", ...agentKeys]);
       mark("research_debate", "done");
+      mark("execution_agent", "done");
       mark("synthesis", "error");
     } else if (stage === "pdf_forge") {
-      markDone(["request_ticket", "discovery", ...agentKeys, "research_debate", "synthesis"]);
+      markDone(["request_ticket", "discovery", ...agentKeys, "research_debate", "execution_agent", "synthesis"]);
       mark("pdf_forge", "error");
     } else if (stage === "research_debate") {
       markDone(["request_ticket", "discovery", ...agentKeys]);
       mark("research_debate", "error");
+    } else if (stage === "execution_agent") {
+      markDone(["request_ticket", "discovery", ...agentKeys, "research_debate"]);
+      mark("execution_agent", "error");
     } else {
       mark("request_ticket", "error");
     }
@@ -2907,6 +3452,7 @@ function buildAnalysisPipeline(jobLike) {
     markDone(["request_ticket", "discovery"]);
     agentKeys.forEach((key) => mark(key, "active"));
     mark("research_debate", "queued");
+    mark("execution_agent", "waiting");
     mark("synthesis", "waiting");
     return ANALYSIS_PIPELINE.map((def) => byKey.get(def.key));
   }
@@ -2914,19 +3460,27 @@ function buildAnalysisPipeline(jobLike) {
   if (stage === "research_debate") {
     markDone(["request_ticket", "discovery", ...agentKeys]);
     mark("research_debate", "active");
+    mark("execution_agent", "queued");
+    mark("synthesis", "waiting");
+    return ANALYSIS_PIPELINE.map((def) => byKey.get(def.key));
+  }
+
+  if (stage === "execution_agent") {
+    markDone(["request_ticket", "discovery", ...agentKeys, "research_debate"]);
+    mark("execution_agent", "active");
     mark("synthesis", "queued");
     return ANALYSIS_PIPELINE.map((def) => byKey.get(def.key));
   }
 
   if (stage === "synthesis") {
-    markDone(["request_ticket", "discovery", ...agentKeys, "research_debate"]);
+    markDone(["request_ticket", "discovery", ...agentKeys, "research_debate", "execution_agent"]);
     mark("synthesis", "active");
     mark("pdf_forge", "queued");
     return ANALYSIS_PIPELINE.map((def) => byKey.get(def.key));
   }
 
   if (stage === "pdf_forge") {
-    markDone(["request_ticket", "discovery", ...agentKeys, "research_debate", "synthesis"]);
+    markDone(["request_ticket", "discovery", ...agentKeys, "research_debate", "execution_agent", "synthesis"]);
     mark("pdf_forge", "active");
     return ANALYSIS_PIPELINE.map((def) => byKey.get(def.key));
   }
@@ -3338,6 +3892,22 @@ function handleApi(req, res, parsed) {
     return sendJson(res, 200, computeStatus(ticker));
   }
 
+  if (pathname === "/api/broker/status" && req.method === "GET") {
+    return getCachedAlpacaSnapshot()
+      .then((broker) => sendJson(res, 200, { broker }))
+      .catch((error) =>
+        sendJson(res, 200, {
+          broker: sanitizeAlpacaSnapshot({
+            configured: alpacaClientConfig().configured,
+            connected: false,
+            paper: alpacaClientConfig().paper,
+            baseUrl: alpacaClientConfig().baseUrl,
+            error: error?.message || String(error),
+          }),
+        })
+      );
+  }
+
   if (pathname === "/api/request-analysis" && req.method === "POST") {
     return readJsonBody(req)
       .then((body) => {
@@ -3478,6 +4048,7 @@ function main() {
     const tradeOk = fs.existsSync(TRADE_DIR);
     const runsOk = fs.existsSync(RUNS_DIR);
     const engineResolved = resolveAnalysisEngine();
+    const alpacaCfg = alpacaClientConfig();
     const status = {
       ok: ok && uiOk && tradeOk && runsOk,
       script: ok,
@@ -3489,6 +4060,9 @@ function main() {
       xaiConfigured: !!process.env.XAI_API_KEY,
       xaiBaseUrl: DEFAULT_XAI_BASE_URL,
       xaiModel: DEFAULT_XAI_MODEL,
+      alpacaConfigured: alpacaCfg.configured,
+      alpacaPaper: alpacaCfg.paper,
+      alpacaBaseUrl: alpacaCfg.baseUrl,
     };
     console.log(JSON.stringify(status, null, 2));
     process.exit(status.ok ? 0 : 1);
@@ -3505,6 +4079,10 @@ function main() {
       console.log(`Using XAI_MODEL=${DEFAULT_XAI_MODEL}`);
       console.log(`Using XAI_API_KEY=${process.env.XAI_API_KEY ? "configured" : "missing"}`);
     }
+    const alpacaCfg = alpacaClientConfig();
+    console.log(`Using ALPACA_BASE_URL=${alpacaCfg.baseUrl}`);
+    console.log(`Using ALPACA_API_KEY=${alpacaCfg.configured ? "configured" : "missing"}`);
+    console.log(`Using ALPACA_MODE=${alpacaCfg.paper ? "paper" : "live-url"}`);
   });
 }
 
@@ -3513,9 +4091,13 @@ if (require.main === module) {
 }
 
 module.exports = {
+  alpacaClientConfig,
+  applyExecutionPlan,
   applyResearchDebate,
+  buildAlpacaRequest,
   buildFundamentalRead,
   buildXaiDebateRequest,
+  buildXaiExecutionRequest,
   buildXaiAnalysisRequest,
   buildAnalysisPipeline,
   buildTechnicalRead,
@@ -3530,7 +4112,9 @@ module.exports = {
   removeStaleLegacyFiles,
   renderMarkdownFromAnalysis,
   safeJoin,
+  sanitizeAlpacaSnapshot,
   summarizeReportInsight,
+  validateExecutionPlan,
   validateResearchDebate,
   validateStructuredAnalysis,
 };
