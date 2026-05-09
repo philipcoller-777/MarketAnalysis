@@ -12,6 +12,7 @@ const {
   mergeSourcedAnalysis,
   normalizeTicker,
   pickLatestReport,
+  removeStaleLegacyFiles,
   safeJoin,
 } = require("./server");
 
@@ -62,6 +63,31 @@ test("pickLatestReport prefers the newest saved report", () => {
     },
   };
   assert.equal(pickLatestReport([older, newer]), newer);
+});
+
+test("removeStaleLegacyFiles drops an older canonical PDF from fresher analysis files", () => {
+  const files = {
+    md: { mtimeMs: 300, path: "/trade/TRADE-ANALYSIS-BTC.md" },
+    json: { mtimeMs: 310, path: "/trade/TRADE-ANALYSIS-BTC.json" },
+    pdf: { mtimeMs: 100, path: "/trade/TRADE-ANALYSIS-BTC.pdf" },
+  };
+
+  const pruned = removeStaleLegacyFiles(files);
+
+  assert.equal(pruned.pdf, undefined);
+  assert.equal(files.pdf.path, "/trade/TRADE-ANALYSIS-BTC.pdf");
+});
+
+test("removeStaleLegacyFiles keeps a PDF generated with the newest analysis files", () => {
+  const files = {
+    md: { mtimeMs: 300 },
+    json: { mtimeMs: 310 },
+    pdf: { mtimeMs: 320 },
+  };
+
+  const pruned = removeStaleLegacyFiles(files);
+
+  assert.equal(pruned.pdf, files.pdf);
 });
 
 test("buildTechnicalRead derives real levels and indicators from candles", () => {

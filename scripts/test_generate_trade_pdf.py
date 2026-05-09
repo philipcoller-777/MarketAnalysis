@@ -1,4 +1,7 @@
 import unittest
+import json
+import subprocess
+import sys
 import uuid
 from pathlib import Path
 
@@ -57,6 +60,35 @@ class GenerateTradePdfTests(unittest.TestCase):
             self.assertTrue(output_path.exists())
             self.assertGreater(output_path.stat().st_size, 0)
         finally:
+            output_path.unlink(missing_ok=True)
+
+    def test_cli_reads_utf8_json_input(self):
+        temp_root = Path(__file__).resolve().parent / ".tmp-tests"
+        temp_root.mkdir(exist_ok=True)
+        input_path = temp_root / f"input-{uuid.uuid4().hex}.json"
+        output_path = temp_root / f"report-{uuid.uuid4().hex}.pdf"
+        data = {
+            "ticker": "BTC",
+            "company_name": "Bitcoin",
+            "overall_score": 67,
+            "utf8_marker": "right quote \u201d and check \u2705",
+        }
+        try:
+            with input_path.open("w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+
+            result = subprocess.run(
+                [sys.executable, str(Path(__file__).resolve().parent / "generate_trade_pdf.py"), str(input_path), str(output_path)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(output_path.exists())
+            self.assertGreater(output_path.stat().st_size, 0)
+        finally:
+            input_path.unlink(missing_ok=True)
             output_path.unlink(missing_ok=True)
 
 

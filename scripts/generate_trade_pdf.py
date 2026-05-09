@@ -1030,7 +1030,7 @@ def main():
     input_file = sys.argv[1]
     output_file = sys.argv[2] if len(sys.argv) > 2 else "TRADE-REPORT.pdf"
 
-    with open(input_file, "r") as f:
+    with open(input_file, "r", encoding="utf-8") as f:
         data = json.load(f)
 
     generate_report(data, output_file)

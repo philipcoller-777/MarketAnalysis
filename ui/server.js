@@ -2142,6 +2142,17 @@ function pickLatestReport(reports) {
   return [...reports].sort((a, b) => reportUpdatedAt(b) - reportUpdatedAt(a))[0] || null;
 }
 
+function removeStaleLegacyFiles(files) {
+  if (!files || !files.pdf) return files || {};
+  const newestAnalysisMtime = Math.max(files.md?.mtimeMs || 0, files.json?.mtimeMs || 0);
+  if (newestAnalysisMtime > 0 && (files.pdf.mtimeMs || 0) < newestAnalysisMtime) {
+    const next = { ...files };
+    delete next.pdf;
+    return next;
+  }
+  return files;
+}
+
 function reportFromRun(run) {
   if (!run) return null;
   const files = run.files || {};
@@ -2238,6 +2249,8 @@ function listLegacyAnalyses() {
     if (item.files.json) {
       item.meta = readJsonFile(canonical.json.absPath);
     }
+
+    item.files = removeStaleLegacyFiles(item.files);
 
     if (Object.keys(item.files).length > 0) out.push(item);
   }
@@ -2956,5 +2969,6 @@ module.exports = {
   mergeSourcedAnalysis,
   normalizeTicker,
   pickLatestReport,
+  removeStaleLegacyFiles,
   safeJoin,
 };
