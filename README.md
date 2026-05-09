@@ -71,7 +71,7 @@ Default local URL:
 ```text
 http://127.0.0.1:8787/
 ```
-
+You will now see the Dashboard: images/Market Analysis.png
 The batch launcher uses port `8799` by default to avoid conflicts with stale local sessions.
 
 ## Output Files
